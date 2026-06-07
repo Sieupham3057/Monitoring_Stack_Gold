@@ -135,14 +135,26 @@ dotnet run
 
 ## Thứ tự học đề xuất
 
-- [x] **Bước 1:** Tạo ShopApi (.NET 8) để có API thực tế
-- [ ] **Bước 2:** Chạy Prometheus + cAdvisor bằng Docker Compose
-- [ ] **Bước 3:** Kết nối Grafana → Prometheus, tạo dashboard đầu tiên
-- [ ] **Bước 4:** Cấu hình AlertManager (alert rule + Slack notification)
-- [ ] **Bước 5:** Cài InfluxDB, viết K6 script load test ShopApi
-- [ ] **Bước 6:** Kết nối Grafana → InfluxDB, xem P95/P99 của K6
-- [ ] **Bước 7:** Expose .NET metrics ra Prometheus (prometheus-net)
-- [ ] **Bước 8:** Dashboard tổng hợp — 1 màn hình thấy toàn bộ hệ thống
+| # | Tên bước | Branch | Trạng thái |
+|---|---|---|---|
+| 1 | Tạo ShopApi (.NET 8) để có API thực tế | `buoc-1-tao-shopapi-dotnet8` | ✅ Done |
+| 2 | Chạy Prometheus + cAdvisor bằng Docker Compose | `buoc-2-prometheus-cadvisor-docker` | ⬜ Todo |
+| 3 | Kết nối Grafana → Prometheus, tạo dashboard đầu tiên | `buoc-3-grafana-prometheus-dashboard` | ⬜ Todo |
+| 4 | Cấu hình AlertManager (alert rule + Slack notification) | `buoc-4-alertmanager-slack` | ⬜ Todo |
+| 5 | Cài InfluxDB, viết K6 script load test ShopApi | `buoc-5-influxdb-k6-loadtest` | ⬜ Todo |
+| 6 | Kết nối Grafana → InfluxDB, xem P95/P99 của K6 | `buoc-6-grafana-influxdb-k6-metrics` | ⬜ Todo |
+| 7 | Expose .NET metrics ra Prometheus (prometheus-net) | `buoc-7-dotnet-prometheus-metrics` | ⬜ Todo |
+| 8 | Dashboard tổng hợp — 1 màn hình thấy toàn bộ hệ thống | `buoc-8-dashboard-tong-hop` | ⬜ Todo |
+
+### Quy ước đặt tên branch
+
+```
+buoc-{số}-{mô-tả-ngắn-không-dấu}
+```
+
+- Viết thường, không dấu tiếng Việt
+- Dùng `-` thay dấu cách
+- Mỗi bước = 1 branch riêng, commit khi hoàn thành bước đó
 
 ---
 
