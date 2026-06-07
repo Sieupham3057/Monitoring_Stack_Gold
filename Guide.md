@@ -1,3 +1,38 @@
+# Mục lục
+
+- [.NET Metrics — Expose ra Prometheus](#net-metrics--expose-ra-prometheus)
+  - [Tại sao cần expose `/metrics` từ app?](#tại-sao-cần-expose-metrics-từ-app)
+  - [Bốn loại metric cơ bản](#bốn-loại-metric-cơ-bản)
+  - [Hai cách expose metrics trong .NET](#hai-cách-expose-metrics-trong-net)
+    - [Cách 1 — prometheus-net](#cách-1--prometheus-net-đơn-giản-thuần-prometheus)
+    - [Cách 2 — OpenTelemetry](#cách-2--opentelemetry-chuẩn-industry-vendor-neutral)
+  - [So sánh hai cách](#so-sánh-hai-cách)
+  - [Prometheus scrape ShopApi như thế nào?](#prometheus-scrape-shopapi-như-thế-nào)
+- [Hướng dẫn triển khai từng bước](#hướng-dẫn-triển-khai-từng-bước)
+  - [Bước 1: Tạo ShopApi (.NET 8)](#-bước-1-tạo-shopapi-net-8)
+  - [Bước 2: Prometheus + cAdvisor bằng Docker Compose](#-bước-2-prometheus--cadvisor-bằng-docker-compose)
+    - [Mục tiêu](#mục-tiêu-bước-này)
+    - [Cấu trúc file mới](#cấu-trúc-file-mới)
+    - [File cấu hình prometheus.yml](#file-cấu-hình-srcmonitoringprometheus prometheusyml)
+    - [Triển khai lên server VMware](#triển-khai-lên-server-vmware)
+    - [Kiểm tra hoạt động](#kiểm-tra-hoạt-động)
+    - [Thực hành: Query PromQL đầu tiên](#thực-hành-query-promql-đầu-tiên)
+    - [Khái niệm cốt lõi](#khái-niệm-cốt-lõi--tech-lead-cần-nắm)
+    - [Bài tập kiểm tra hiểu biết](#bài-tập-kiểm-tra-hiểu-biết)
+    - [Troubleshooting cAdvisor](#troubleshooting--cadvisor-lỗi-permission-với-non-root-user)
+  - [Bước 3: Kết nối Grafana → Prometheus, tạo dashboard đầu tiên](#-bước-3-kết-nối-grafana--prometheus-tạo-dashboard-đầu-tiên)
+    - [Tại sao cần Grafana?](#tại-sao-cần-grafana-prometheus-ui-không-đủ-sao)
+    - [Provisioning — IaC cho Grafana](#khái-niệm-provisioning--iac-cho-grafana)
+    - [Cấu trúc file mới](#cấu-trúc-file-mới-1)
+    - [Triển khai lên server VMware](#triển-khai-lên-server-vmware-1)
+    - [Kiểm tra hoạt động](#kiểm-tra-hoạt-động-1)
+    - [Thực hành: Tạo panel đầu tiên bằng tay](#thực-hành-tạo-panel-đầu-tiên-bằng-tay)
+    - [Khái niệm cốt lõi](#khái-niệm-cốt-lõi--tech-lead-cần-nắm-1)
+    - [Troubleshooting Grafana](#troubleshooting--các-lỗi-hay-gặp)
+    - [Bài tập kiểm tra hiểu biết](#bài-tập-kiểm-tra-hiểu-biết-1)
+
+---
+
 ## .NET Metrics — Expose ra Prometheus
 
 ### Tại sao cần expose `/metrics` từ app?
