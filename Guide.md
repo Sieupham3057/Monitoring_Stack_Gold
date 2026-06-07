@@ -735,3 +735,403 @@ curl -s http://localhost:8080/metrics | grep container_cpu | head -5
 # 5. Xác nhận Prometheus thấy cAdvisor là UP
 curl -s http://localhost:9090/api/v1/targets | grep cadvisor
 ```
+
+---
+
+### ✅ Bước 3: Kết nối Grafana → Prometheus, tạo dashboard đầu tiên
+
+#### Mục tiêu bước này
+
+Sau bước này bạn sẽ:
+- Hiểu tại sao cần Grafana — Prometheus chỉ lưu data, Grafana mới **vẽ thành biểu đồ có nghĩa**
+- Hiểu khái niệm **Provisioning** — cấu hình Grafana bằng file YAML thay vì bấm tay trên UI
+- Có dashboard tự động load khi container khởi động — không bị mất khi rebuild
+- Biết cách đọc CPU/RAM/Network của từng container theo thời gian thực
+
+---
+
+#### Tại sao cần Grafana? Prometheus UI không đủ sao?
+
+Prometheus UI (`:9090`) chỉ phù hợp để **debug và khám phá** — chạy query, xem target, kiểm tra alert.
+
+Grafana giải quyết những điểm yếu đó:
+
+| Vấn đề với Prometheus UI | Grafana giải quyết thế nào |
+|---|---|
+| Mỗi lần reload trang mất query | Dashboard lưu vĩnh viễn, share được link |
+| Chỉ 1 biểu đồ 1 lúc | Nhiều panel cùng lúc trên 1 màn hình |
+| Không có màu sắc, threshold rõ ràng | Alert coloring, threshold lines, annotations |
+| Khó so sánh nhiều metric cùng lúc | Multi-datasource: Prometheus + InfluxDB + ... |
+| Không có access control | User/Team/Organization permissions |
+
+> **Tech Lead cần nhớ:** Grafana không lưu data — nó chỉ **query và vẽ**. Data vẫn sống trong Prometheus. Nếu Prometheus down, Grafana trắng panel. Đây là điểm thiết kế quan trọng khi thiết kế HA.
+
+---
+
+#### Khái niệm Provisioning — IaC cho Grafana
+
+**Provisioning** = cấu hình Grafana thông qua file YAML/JSON thay vì bấm tay trên UI.
+
+```
+Không có Provisioning:
+  Container restart → mất toàn bộ datasource, dashboard tạo tay
+
+Có Provisioning:
+  Container restart → Grafana đọc lại file → khôi phục hoàn toàn
+```
+
+**Hai loại provisioning quan trọng:**
+
+| Loại | File | Tác dụng |
+|---|---|---|
+| **Datasource** | `provisioning/datasources/*.yml` | Tự động kết nối tới Prometheus (hoặc InfluxDB, Loki...) |
+| **Dashboard** | `provisioning/dashboards/*.yml` + `dashboards/*.json` | Tự động import dashboard từ file JSON |
+
+> **Đây là cách làm đúng trong production** — mọi config được commit vào git, team nào cũng dùng cùng một bộ dashboard, không ai "vô tình xóa" dashboard đang dùng.
+
+---
+
+#### Cấu trúc file mới
+
+```
+MORNITORING/
+├── docker-compose.yml                         ← Bổ sung service grafana + volume grafana_data
+└── src/
+    └── monitoring/
+        ├── prometheus/
+        │   └── prometheus.yml
+        └── grafana/
+            ├── provisioning/
+            │   ├── datasources/
+            │   │   └── prometheus.yml         ← [MỚI] Auto-connect tới Prometheus
+            │   └── dashboards/
+            │       └── dashboard.yml          ← [MỚI] Khai báo nơi chứa dashboard JSON
+            └── dashboards/
+                └── monitoring-overview.json   ← [MỚI] Dashboard pre-built: CPU/RAM/Network
+```
+
+---
+
+#### File cấu hình: `src/monitoring/grafana/provisioning/datasources/prometheus.yml`
+
+```yaml
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    # [BẮT BUỘC] Loại plugin — Grafana dùng đúng query engine
+    type: prometheus
+
+    # [BẮT BUỘC] proxy = Grafana server gọi Prometheus thay browser
+    # Quan trọng trong Docker: browser của bạn không cần biết địa chỉ Prometheus nội bộ
+    access: proxy
+
+    # [BẮT BUỘC] URL nội bộ Docker — "prometheus" là tên service trong docker-compose
+    url: http://prometheus:9090
+
+    # [KHUYẾN NGHỊ] Mặc định — tự chọn khi tạo panel mới
+    isDefault: true
+
+    jsonData:
+      # POST tránh lỗi "URI too long" với query PromQL phức tạp
+      httpMethod: POST
+      # Gợi ý khoảng cách tối thiểu giữa 2 data point — phải khớp scrape_interval
+      timeInterval: "15s"
+```
+
+> **Tại sao `access: proxy` chứ không phải `direct`?**
+>
+> Với `direct`, browser của bạn gọi thẳng `http://prometheus:9090` — địa chỉ này chỉ có nghĩa trong Docker network, không resolve được từ máy tính của bạn. Với `proxy`, Grafana server (trong container) đứng ra gọi thay bạn — hoạt động bình thường vì cùng Docker network.
+
+---
+
+#### File cấu hình: `src/monitoring/grafana/provisioning/dashboards/dashboard.yml`
+
+```yaml
+apiVersion: 1
+
+providers:
+  - name: "Monitoring Stack"
+    orgId: 1
+    folder: "Monitoring"      # Tên folder trong Grafana UI
+    type: file
+
+    # false = không xóa dashboard từ UI khi file JSON vẫn còn
+    disableDeletion: false
+
+    # Grafana check file thay đổi mỗi 30 giây — không cần restart khi sửa JSON
+    updateIntervalSeconds: 30
+
+    # true = cho phép sửa dashboard qua UI
+    allowUiUpdates: true
+
+    options:
+      # Đường dẫn bên trong container — mount từ ./src/monitoring/grafana/dashboards
+      path: /var/lib/grafana/dashboards
+```
+
+---
+
+#### Giải thích dashboard `monitoring-overview.json`
+
+Dashboard đã pre-built gồm **8 panel** sắp xếp theo grid 24 cột:
+
+**Hàng 1 — Tổng quan nhanh (4 stat panels):**
+
+| Panel | Query | Ý nghĩa |
+|---|---|---|
+| Containers đang chạy | `count(container_memory_usage_bytes{image!=""})` | Đếm số container thật đang chạy |
+| Prometheus Time Series | `prometheus_tsdb_head_series` | Tổng số time-series đang theo dõi |
+| CPU tổng | `sum(rate(...)) * 100` | % CPU tổng cộng của toàn bộ container |
+| RAM tổng | `sum(...) / 1024 / 1024` | Tổng RAM dùng, đơn vị MB |
+
+**Hàng 2 — Chi tiết theo container (2 time-series panels):**
+
+| Panel | Query | Ý nghĩa |
+|---|---|---|
+| CPU % theo container | `rate(container_cpu_usage_seconds_total{image!=""}[5m]) * 100` | Mỗi đường = 1 container |
+| Memory MB theo container | `container_memory_usage_bytes{image!=""} / 1024 / 1024` | So sánh RAM giữa các container |
+
+**Hàng 3 — Network I/O (2 time-series panels):**
+
+| Panel | Query | Ý nghĩa |
+|---|---|---|
+| Network Receive | `rate(container_network_receive_bytes_total[5m])` | Bytes/sec nhận vào từng container |
+| Network Transmit | `rate(container_network_transmit_bytes_total[5m])` | Bytes/sec gửi ra từng container |
+
+> **Legend template `{{container_label_com_docker_compose_service}}`** — label này do Docker Compose tự động gắn vào mỗi container. Khi cAdvisor dùng containerd factory, đây là label duy nhất chứa tên service thân thiện (shopapi, prometheus, grafana...).
+
+---
+
+#### Giải thích service Grafana trong `docker-compose.yml`
+
+```yaml
+grafana:
+  image: grafana/grafana:10.4.2
+  ports:
+    - "3000:3000"
+  environment:
+    GF_SECURITY_ADMIN_USER: "admin"
+    GF_SECURITY_ADMIN_PASSWORD: "admin123"
+    # Tắt signup — không cần trong môi trường dev
+    GF_USERS_ALLOW_SIGN_UP: "false"
+  volumes:
+    # Persist: user, settings, dashboard tạo tay
+    - grafana_data:/var/lib/grafana
+    # [BẮT BUỘC] Provisioning files — datasource + dashboard providers
+    - ./src/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    # [BẮT BUỘC] File JSON dashboard
+    - ./src/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+  depends_on:
+    - prometheus
+```
+
+> **Tại sao có cả `grafana_data` volume VÀ mount thư mục dashboards?**
+>
+> `grafana_data` lưu những thứ **user tạo ra trong UI** (dashboard mới, user mới, API keys). Mount `dashboards/` cung cấp **dashboard chuẩn từ code** — hai thứ này tồn tại song song. Khi provisioning tạo dashboard, Grafana ghi metadata vào `grafana_data` nhưng nguồn thật là file JSON.
+
+---
+
+#### Triển khai lên server VMware
+
+**Bước 3.1 — Sync code mới lên server**
+
+```bash
+# Trên máy Windows — sync thêm thư mục grafana vừa tạo
+scp -r e:/TECHLEAD_PROJECT/MORNITORING/src/monitoring/grafana user@192.168.1.35:/opt/monitoring/src/monitoring/
+scp e:/TECHLEAD_PROJECT/MORNITORING/docker-compose.yml user@192.168.1.35:/opt/monitoring/
+```
+
+**Bước 3.2 — SSH và khởi động Grafana**
+
+```bash
+ssh user@192.168.1.35
+cd /opt/monitoring
+
+# Pull image Grafana và start (không ảnh hưởng các service đang chạy)
+docker compose up -d grafana
+
+# Theo dõi log — chờ thấy "HTTP server listen" là sẵn sàng
+docker compose logs -f grafana
+# Dừng xem log: Ctrl+C
+```
+
+**Bước 3.3 — Kiểm tra container đã chạy**
+
+```bash
+docker compose ps
+
+# Kết quả mong đợi:
+# NAME                     STATUS          PORTS
+# monitoring_cadvisor      Up              0.0.0.0:8080->8080/tcp
+# monitoring_grafana       Up              0.0.0.0:3000->3000/tcp
+# monitoring_prometheus    Up              0.0.0.0:9090->9090/tcp
+# monitoring_shopapi       Up              0.0.0.0:5065->8080/tcp
+# monitoring_sqlserver     Up (healthy)    0.0.0.0:1433->1433/tcp
+```
+
+---
+
+#### Kiểm tra hoạt động
+
+**Kiểm tra 1 — Đăng nhập Grafana:**
+
+Mở trình duyệt: `http://192.168.1.35:3000`
+- Username: `admin`
+- Password: `admin123`
+
+Sau khi đăng nhập, **không** thấy màn hình đổi password — đó là bình thường (đã disable signup).
+
+**Kiểm tra 2 — Datasource đã được provision:**
+
+Vào **Connections → Data sources** → phải thấy `Prometheus` đã cấu hình sẵn với URL `http://prometheus:9090`.
+
+Click **"Test"** → phải thấy `"Successfully queried the Prometheus API."` (màu xanh lá).
+
+Nếu thấy lỗi `"Bad Gateway"` hoặc timeout → kiểm tra Prometheus có đang chạy không: `docker compose ps prometheus`.
+
+**Kiểm tra 3 — Dashboard đã được import:**
+
+Vào **Dashboards** → folder **Monitoring** → click **"Monitoring Overview — Docker Containers"**.
+
+Phải thấy 8 panel đang hiện data. Nếu panel trắng:
+- Đợi thêm 30 giây để Prometheus có đủ data
+- Kiểm tra time range góc trên phải — đặt `Last 30 minutes`
+
+---
+
+#### Hiểu sâu hơn: Các thành phần UI của Grafana
+
+**Time range picker (góc trên phải):**
+```
+Last 5 minutes / 15m / 30m / 1h / ...
+```
+Mọi panel trong dashboard đều lọc data theo time range này. Đây là điểm mạnh so với Prometheus UI.
+
+**Refresh interval:**
+```
+Off / 5s / 10s / 30s / 1m / ...
+```
+Dashboard pre-built đặt sẵn `30s` — tự động cập nhật mà không cần reload trang.
+
+**Panel title → 3 chấm → Edit:**
+
+Click để vào edit mode. Bạn sẽ thấy:
+- **Query tab**: viết PromQL, thấy kết quả ngay
+- **Transform tab**: biến đổi data trước khi vẽ (rename, filter, join...)
+- **Visualization tab**: chọn loại chart (timeseries, bar, gauge, table...)
+- **Panel tab**: đặt tiêu đề, description, unit, thresholds
+
+> **Tech Lead cần hiểu:** Grafana không chạy PromQL trực tiếp. Mỗi khi bạn mở dashboard, Grafana gửi query tới Prometheus (`/api/v1/query_range`), nhận JSON về và vẽ. Bạn có thể dùng browser DevTools để xem request này.
+
+**Shared crosshair (graphTooltip: 1):**
+
+Dashboard đã bật `graphTooltip: 1` — khi hover chuột vào 1 panel, tất cả panel khác cùng highlight tại điểm thời gian đó. Rất hữu ích khi debug: thấy CPU tăng đột biến → ngay lập tức thấy RAM và Network tại cùng thời điểm đó.
+
+---
+
+#### Thực hành: Tạo panel đầu tiên bằng tay
+
+Mục tiêu: tạo panel mới đo **số request Prometheus đang xử lý**.
+
+1. Vào dashboard `Monitoring Overview` → click **Add** → **Visualization**
+2. Trong **Query**, chọn datasource `Prometheus`
+3. Nhập query:
+   ```promql
+   rate(prometheus_http_requests_total[5m])
+   ```
+4. Đổi **Legend** thành `{{handler}} {{code}}`
+5. Trong **Visualization** tab, chọn `Time series`
+6. Trong **Panel** tab:
+   - Title: `Prometheus HTTP Requests/sec`
+   - Description: `Số request tới Prometheus API mỗi giây, phân loại theo endpoint và status code`
+7. Click **Apply** → panel xuất hiện trong dashboard
+8. Click **Save dashboard** (Ctrl+S) để lưu
+
+> **Câu hỏi để kiểm tra hiểu biết:** Panel này khác với `prometheus_http_requests_total` như thế nào? Tại sao dùng `rate()` thay vì giá trị thô?
+
+---
+
+#### Khái niệm cốt lõi — Tech Lead cần nắm
+
+| Khái niệm | Ý nghĩa |
+|---|---|
+| **Provisioning** | Config-as-code cho Grafana — datasource và dashboard được khai báo bằng YAML/JSON, không bấm tay |
+| **Datasource** | Kết nối tới nguồn data (Prometheus, InfluxDB, Loki...). 1 Grafana có thể kết nối nhiều datasource |
+| **Dashboard** | Tập hợp các panel. Lưu dưới dạng JSON — có thể import/export, commit git |
+| **Panel** | 1 biểu đồ = 1 query (hoặc nhiều query) + 1 visualization type |
+| **Variable** | Dashboard template variable (`${datasource}`) — cho phép 1 dashboard dùng được nhiều datasource |
+| **graphTooltip** | Chế độ tooltip: 0=default, 1=shared crosshair (hover đồng bộ toàn bộ panel), 2=shared tooltip |
+
+---
+
+#### Troubleshooting — Các lỗi hay gặp
+
+**Lỗi 1: Panel hiện "No data"**
+
+```bash
+# Kiểm tra Prometheus có data không
+curl -s "http://192.168.1.35:9090/api/v1/query?query=container_memory_usage_bytes" | python3 -m json.tool | head -20
+```
+
+Nếu có data trong Prometheus nhưng Grafana vẫn trắng → kiểm tra time range trong Grafana có quá nhỏ không (đặt `Last 30 minutes`).
+
+**Lỗi 2: Datasource test fail — "Bad Gateway"**
+
+Grafana không gọi được Prometheus. Nguyên nhân phổ biến:
+```bash
+# Kiểm tra Prometheus có chạy không
+docker compose ps prometheus
+
+# Kiểm tra Grafana có cùng network không
+docker inspect monitoring_grafana | grep -A 10 "Networks"
+docker inspect monitoring_prometheus | grep -A 10 "Networks"
+# Cả hai phải cùng trong "monitoring_net"
+```
+
+**Lỗi 3: Dashboard không tự load — folder "Monitoring" trống**
+
+```bash
+# Xem log Grafana tìm lỗi provisioning
+docker compose logs grafana | grep -i "provision\|dashboard\|error"
+
+# Kiểm tra file JSON có hợp lệ không
+docker exec monitoring_grafana cat /var/lib/grafana/dashboards/monitoring-overview.json | python3 -m json.tool > /dev/null && echo "JSON hợp lệ" || echo "JSON lỗi"
+```
+
+**Lỗi 4: Grafana khởi động rất chậm**
+
+Bình thường. Lần đầu Grafana cần ~20-30 giây để:
+- Init database (SQLite mặc định trong `grafana_data`)
+- Load plugins
+- Apply provisioning
+
+```bash
+# Xem tiến trình khởi động
+docker compose logs -f grafana | grep -E "started|ready|listen|error"
+```
+
+---
+
+#### Bài tập kiểm tra hiểu biết
+
+1. **Đổi time range** về `Last 5 minutes` → quan sát data thay đổi. Hiểu tại sao một số panel có thể trống khi time range quá ngắn.
+
+2. **Duplicate panel CPU** → đổi query thành chỉ lấy `shopapi`:
+   ```promql
+   rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service="shopapi"}[5m]) * 100
+   ```
+   → thấy sự khác biệt giữa filter toàn bộ và filter 1 service cụ thể.
+
+3. **Tạo panel Alert threshold**: Duplicate panel Memory → vào Panel tab → Thresholds → thêm threshold 500MB màu vàng, 1GB màu đỏ → quan sát đường kẻ ngang trên biểu đồ.
+
+4. **Export dashboard**: Click **Share** (icon trên dashboard title) → **Export** → **Save to file** → xem file JSON được tạo ra. Đây chính xác là format của `monitoring-overview.json`.
+
+5. **Thử tắt 1 container** rồi xem dashboard:
+   ```bash
+   docker compose stop cadvisor
+   # Quan sát: panel "Containers đang chạy" giảm, CPU/RAM panel mất series của cadvisor
+   docker compose start cadvisor
+   ```
+
+**Kết quả bước 3:** Grafana đang chạy tại `http://192.168.1.35:3000`, datasource Prometheus được cấu hình tự động, dashboard `Monitoring Overview` hiện CPU/RAM/Network của tất cả container. Bước 4 sẽ cấu hình AlertManager để tự động gửi thông báo khi có bất thường.

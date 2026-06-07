@@ -1,0 +1,41 @@
+# ============================================================
+# GRAFANA DASHBOARD PROVISIONING — dashboard.yml
+# Grafana tự động load dashboard từ file JSON khi khởi động.
+# Thêm file .json vào thư mục dashboards → Grafana tự import.
+#
+# Đường dẫn trong container: /etc/grafana/provisioning/dashboards/
+# ============================================================
+
+apiVersion: 1
+
+providers:
+  # ----------------------------------------------------------
+  # PROVIDER: Đọc dashboard từ file hệ thống
+  # [BẮT BUỘC] Phải có ít nhất 1 provider để Grafana biết tìm dashboard ở đâu
+  # ----------------------------------------------------------
+  - name: "Monitoring Stack"
+    # [BẮT BUỘC] orgId = 1 là tổ chức mặc định của Grafana
+    orgId: 1
+
+    # [TÙY CHỌN] Tên folder hiển thị trong Grafana UI để phân loại dashboard
+    folder: "Monitoring"
+    folderUid: "monitoring-folder"
+
+    # [BẮT BUỘC] Loại provider — "file" đọc từ đường dẫn file hệ thống
+    type: file
+
+    # [TÙY CHỌN] false = không cho xóa dashboard từ UI nếu file JSON vẫn còn
+    # true = xóa được (hữu ích khi phát triển)
+    disableDeletion: false
+
+    # [KHUYẾN NGHỊ] Grafana check file thay đổi mỗi 30 giây và reload tự động
+    # Không cần restart Grafana khi sửa dashboard JSON
+    updateIntervalSeconds: 30
+
+    # [KHUYẾN NGHỊ] Cho phép sửa dashboard qua UI và lưu lại vào file
+    allowUiUpdates: true
+
+    options:
+      # [BẮT BUỘC] Thư mục chứa file dashboard JSON bên trong container
+      # Mount từ host: ./src/monitoring/grafana/dashboards → /var/lib/grafana/dashboards
+      path: /var/lib/grafana/dashboards

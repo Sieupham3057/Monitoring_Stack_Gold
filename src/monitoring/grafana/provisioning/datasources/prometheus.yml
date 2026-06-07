@@ -1,0 +1,40 @@
+# ============================================================
+# GRAFANA DATASOURCE PROVISIONING — prometheus.yml
+# File này được Grafana đọc khi khởi động để tự động cấu hình datasource.
+# Không cần vào UI bấm tay — đây là cách "Infrastructure as Code" cho Grafana.
+#
+# Đường dẫn trong container: /etc/grafana/provisioning/datasources/
+# ============================================================
+
+apiVersion: 1
+
+datasources:
+  # ----------------------------------------------------------
+  # DATASOURCE 1: Prometheus
+  # [BẮT BUỘC] Nguồn dữ liệu chính cho toàn bộ monitoring stack
+  # ----------------------------------------------------------
+  - name: Prometheus
+    # [BẮT BUỘC] Loại datasource — Grafana nhận ra "prometheus" để dùng đúng plugin
+    type: prometheus
+
+    # [BẮT BUỘC] proxy = Grafana server gọi Prometheus thay cho browser
+    # Ngược lại: direct = browser của user gọi thẳng → không dùng trong Docker (CORS, firewall)
+    access: proxy
+
+    # [BẮT BUỘC] URL nội bộ Docker — "prometheus" là tên service trong docker-compose
+    # Grafana và Prometheus cùng network "monitoring_net" nên resolve được tên service
+    url: http://prometheus:9090
+
+    # [KHUYẾN NGHỊ] Đặt làm datasource mặc định
+    # Khi tạo panel mới trong Grafana sẽ tự chọn cái này
+    isDefault: true
+
+    # [KHUYẾN NGHỊ] Cho phép sửa datasource qua UI (hữu ích lúc debug)
+    editable: true
+
+    jsonData:
+      # Dùng POST thay GET cho query — tránh lỗi "URI too long" với query dài
+      httpMethod: POST
+      # Gợi ý cho Grafana khoảng thời gian tối thiểu giữa 2 điểm data
+      # Phải khớp với scrape_interval trong prometheus.yml
+      timeInterval: "15s"

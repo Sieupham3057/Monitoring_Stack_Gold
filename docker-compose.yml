@@ -117,6 +117,40 @@ services:
       - monitoring_net
 
   # ----------------------------------------------------------
+  # GRAFANA — Visualization layer, vẽ dashboard từ Prometheus
+  # [BẮT BUỘC] Bước 3: giao diện trực quan để đọc metrics
+  # Admin UI: http://192.168.1.35:3000  (admin / admin123)
+  # ----------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: monitoring_grafana
+    ports:
+      # UI: http://192.168.1.35:3000
+      - "3000:3000"
+    environment:
+      # [BẮT BUỘC] Tài khoản admin đăng nhập lần đầu
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "admin123"
+      # [KHUYẾN NGHỊ] Tắt đăng ký user mới qua UI — không cần trong môi trường nghiên cứu
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # [TÙY CHỌN] Tắt thông báo update — giữ UI gọn
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      # [KHUYẾN NGHỊ] Persist data Grafana (user, dashboard tạo tay, settings)
+      - grafana_data:/var/lib/grafana
+      # [BẮT BUỘC] Mount provisioning — tự động cấu hình datasource khi khởi động
+      - ./src/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      # [BẮT BUỘC] Mount thư mục chứa file dashboard JSON
+      - ./src/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      # [BẮT BUỘC] Grafana cần Prometheus đã chạy để kiểm tra datasource
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - monitoring_net
+
+  # ----------------------------------------------------------
   # cADVISOR — Container Advisor, thu thập metrics của Docker
   # [BẮT BUỘC] Bước 2: nguồn metrics container cho Prometheus
   # Tự động phát hiện tất cả container đang chạy trên host
@@ -160,6 +194,9 @@ volumes:
     driver: local
   # [BẮT BUỘC] Bước 2: lưu metrics của Prometheus
   prometheus_data:
+    driver: local
+  # [BẮT BUỘC] Bước 3: lưu cấu hình và dashboard của Grafana
+  grafana_data:
     driver: local
 
 # ============================================================

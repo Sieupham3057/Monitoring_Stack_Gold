@@ -15,8 +15,9 @@
 - [Môi trường](#môi-trường)
 - [.NET Metrics — Expose ra Prometheus](Guide.md#net-metrics--expose-ra-prometheus)
 - **Hướng dẫn triển khai từng bước**
-  - [Bước 1: Tạo ShopApi (.NET 8)](#-bước-1-tạo-shopapi-net-8)
-  - [Bước 2: Prometheus + cAdvisor bằng Docker Compose](#-bước-2-prometheus--cadvisor-bằng-docker-compose)
+  - [Bước 1: Tạo ShopApi (.NET 8)](Guide.md#-bước-1-tạo-shopapi-net-8)
+  - [Bước 2: Prometheus + cAdvisor bằng Docker Compose](Guide.md#-bước-2-prometheus--cadvisor-bằng-docker-compose)
+  - [Bước 3: Kết nối Grafana → Prometheus, tạo dashboard đầu tiên](Guide.md#-bước-3-kết-nối-grafana--prometheus-tạo-dashboard-đầu-tiên)
 
 ---
 
@@ -164,7 +165,7 @@ dotnet run
 |---|---|---|---|
 | 1 | Tạo ShopApi (.NET 8) để có API thực tế | `buoc-1-tao-shopapi-dotnet8` | ✅ Done |
 | 2 | Chạy Prometheus + cAdvisor bằng Docker Compose | `buoc-2-prometheus-cadvisor-docker` | ✅ Done |
-| 3 | Kết nối Grafana → Prometheus, tạo dashboard đầu tiên | `buoc-3-grafana-prometheus-dashboard` | ⬜ Todo |
+| 3 | Kết nối Grafana → Prometheus, tạo dashboard đầu tiên | `buoc-3-grafana-prometheus-dashboard` | ✅ Done |
 | 4 | Cấu hình AlertManager (alert rule + Slack notification) | `buoc-4-alertmanager-slack` | ⬜ Todo |
 | 5 | Cài InfluxDB, viết K6 script load test ShopApi | `buoc-5-influxdb-k6-loadtest` | ⬜ Todo |
 | 6 | Kết nối Grafana → InfluxDB, xem P95/P99 của K6 | `buoc-6-grafana-influxdb-k6-metrics` | ⬜ Todo |
