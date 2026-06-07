@@ -127,11 +127,20 @@ services:
     ports:
       # UI: http://192.168.1.35:8080
       - "8080:8080"
+    command:
+      # [BẮT BUỘC] Ubuntu 22.04+ Docker dùng containerd snapshotter thay vì overlay2 truyền thống.
+      # cAdvisor Docker factory đọc sai đường dẫn layerdb → dùng containerd factory trực tiếp.
+      # /var/run/containerd/containerd.sock vì /var/run mount từ host (symlink → /run)
+      - '--containerd=/var/run/containerd/containerd.sock'
+      # [BẮT BUỘC] Docker containers chạy trong namespace "moby" của containerd (không phải default "k8s.io")
+      - '--containerd-namespace=moby'
     volumes:
       # [BẮT BUỘC] cAdvisor cần đọc thông tin từ host OS để lấy metrics
       - /:/rootfs:ro                        # filesystem gốc của host
-      - /var/run:/var/run:ro                # socket Docker daemon
+      - /var/run/docker.sock:/var/run/docker.sock  # Docker socket (không :ro — Unix socket cần write để connect)
+      - /var/run:/var/run:ro                # chứa containerd.sock tại /var/run/containerd/containerd.sock
       - /sys:/sys:ro                        # thông tin kernel, cgroups
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro   # [BẮT BUỘC nếu cgroup v2] cgroup v2 hierarchy
       - /var/lib/docker/:/var/lib/docker:ro # metadata các container
       - /dev/disk/:/dev/disk:ro             # thông tin disk I/O
     # [BẮT BUỘC] cAdvisor cần quyền truy cập sâu vào kernel

@@ -589,11 +589,19 @@ prometheus:
 cadvisor:
   image: gcr.io/cadvisor/cadvisor:v0.49.1
   privileged: true          # cần đọc cgroups, namespace của kernel
+  command:
+    # Ubuntu 22.04+ Docker dùng containerd snapshotter — phải dùng containerd factory
+    - '--containerd=/var/run/containerd/containerd.sock'
+    # Docker containers chạy trong namespace "moby" của containerd
+    - '--containerd-namespace=moby'
   volumes:
     - /:/rootfs:ro          # filesystem host (đọc disk usage)
-    - /var/run:/var/run:ro  # Docker daemon socket
+    - /var/run/docker.sock:/var/run/docker.sock  # Docker socket (không :ro)
+    - /var/run:/var/run:ro  # chứa containerd.sock tại /var/run/containerd/containerd.sock
     - /sys:/sys:ro          # thông tin cgroups (CPU, memory limits)
+    - /sys/fs/cgroup:/sys/fs/cgroup:ro  # cgroup v2 hierarchy (Ubuntu 22.04+)
     - /var/lib/docker/:/var/lib/docker:ro  # metadata containers
+    - /dev/disk/:/dev/disk:ro             # thông tin disk I/O
 ```
 
 > cAdvisor cần `privileged: true` vì nó đọc **cgroups** — cơ chế kernel Linux dùng để cô lập tài nguyên cho container. Không có quyền này, nó không đọc được CPU/RAM thật của từng container.
@@ -673,26 +681,33 @@ Vào Prometheus UI → tab **Graph** → thử các query sau:
 ```promql
 rate(container_cpu_usage_seconds_total{image!=""}[5m])
 ```
-> `rate()` tính tốc độ thay đổi trong 5 phút. `image!=""` lọc bỏ các process system không phải container thật.
+> `rate()` tính tốc độ thay đổi trong 5 phút. `image!=""` lọc bỏ process system, chỉ giữ Docker container thật.
 
 **Query 2 — RAM đang dùng (bytes) theo container:**
 ```promql
-container_memory_usage_bytes{image!=""}
+container_memory_usage_bytes{image!=""} / 1024 / 1024
 ```
-> Chia cho `1024*1024` để đổi sang MB:
-> ```promql
-> container_memory_usage_bytes{image!=""} / 1024 / 1024
-> ```
+> Đã chia sẵn ra MB.
 
 **Query 3 — Số container đang chạy:**
 ```promql
-count(container_last_seen{image!=""})
+count(container_memory_usage_bytes{image!=""})
 ```
+> `container_last_seen` không được export khi dùng containerd factory. Dùng `container_memory_usage_bytes{image!=""}` thay thế — mọi container đang chạy đều có metric này.
 
 **Query 4 — CPU của riêng ShopApi:**
 ```promql
-rate(container_cpu_usage_seconds_total{name="monitoring_shopapi"}[5m]) * 100
+rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service="shopapi"}[5m]) * 100
 ```
+> Khi cAdvisor dùng **containerd factory** (Ubuntu 22.04+ với Docker containerd snapshotter), label `name` chứa container ID hash thay vì tên thân thiện. Filter đúng là dùng label Docker Compose tự động gắn: `container_label_com_docker_compose_service`.
+>
+> **Bảng so sánh cách filter container:**
+>
+> | Mục tiêu | Label filter | Ví dụ |
+> |---|---|---|
+> | Theo service Compose | `container_label_com_docker_compose_service` | `="shopapi"` |
+> | Theo image | `image=~".*pattern.*"` | `=~".*prometheus.*"` |
+> | Tất cả container thật | `image!=""` | — |
 
 **Query 5 — Prometheus scrape được bao nhiêu metric:**
 ```promql
@@ -760,6 +775,41 @@ docker compose logs cadvisor 2>&1 | head -50
 # "no such file"       → Nguyên nhân 2 (cgroup v2)
 # "operation not permitted" → Nguyên nhân 3 (AppArmor)
 ```
+
+---
+
+**Nguyên nhân 0 — cAdvisor thấy system cgroups nhưng không thấy Docker container metadata** *(hay gặp, dễ bỏ qua)*
+
+**Triệu chứng:** Query `{image!=""}` hoặc `{name!=""}` trả về rỗng. `container_memory_usage_bytes` chỉ thấy entries `/system.slice/...`, không thấy `name="monitoring_shopapi"`.
+
+**Tại sao xảy ra:**
+Mount `/var/run:/var/run:ro` đôi khi không đủ để cAdvisor kết nối Docker socket bên trong container do thứ tự mount hoặc permission của socket file. cAdvisor vẫn đọc được cgroups Linux (nên thấy system data) nhưng không lấy được Docker metadata (image name, container name).
+
+**Fix thực sự (Ubuntu 22.04+ với Docker containerd snapshotter):**
+
+Ubuntu 22.04+ dùng Docker với `containerd snapshotter` (`driver-type: io.containerd.snapshotter.v1`). cAdvisor Docker factory đọc sai đường dẫn layer metadata → phải dùng **containerd factory** với namespace `moby`:
+
+```yaml
+cadvisor:
+  command:
+    - '--containerd=/var/run/containerd/containerd.sock'
+    - '--containerd-namespace=moby'   # Docker containers nằm trong namespace "moby"
+  volumes:
+    - /var/run/docker.sock:/var/run/docker.sock  # không :ro
+    - /var/run:/var/run:ro  # chứa containerd.sock
+    - /sys/fs/cgroup:/sys/fs/cgroup:ro  # cgroup v2
+    - ...
+```
+
+```bash
+# Apply fix
+docker compose up -d --force-recreate cadvisor
+
+# Xác nhận: phải thấy container Docker trong output
+curl -s http://localhost:8080/metrics | grep 'name="monitoring_shopapi"' | head -3
+```
+
+**Tại sao namespace là `moby`?** Docker Engine đặt tên namespace `moby` cho toàn bộ Docker containers khi chạy trên containerd. Khác với Kubernetes dùng namespace `k8s.io`. cAdvisor mặc định tìm ở `k8s.io` nên không thấy Docker containers.
 
 ---
 
