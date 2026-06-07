@@ -112,7 +112,7 @@ app.UseSwagger();
 app.UseSwaggerUI(c =>
 {
     c.SwaggerEndpoint("/swagger/v1/swagger.json", "ShopApi v1");
-    c.RoutePrefix = string.Empty; // Mở Swagger tại root: http://localhost:5065
+    // RoutePrefix mặc định = "swagger" → truy cập tại /swagger
 });
 
 app.UseCors();
