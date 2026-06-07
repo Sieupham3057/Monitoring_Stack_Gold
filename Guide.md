@@ -541,17 +541,19 @@ count(container_memory_usage_bytes{image!=""})
 
 **Query 4 — CPU của riêng ShopApi:**
 ```promql
-rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service="shopapi"}[5m]) * 100
+rate(container_cpu_usage_seconds_total{image=~".*shopapi.*"}[5m]) * 100
 ```
-> Khi cAdvisor dùng **containerd factory** (Ubuntu 22.04+ với Docker containerd snapshotter), label `name` chứa container ID hash thay vì tên thân thiện. Filter đúng là dùng label Docker Compose tự động gắn: `container_label_com_docker_compose_service`.
+> Khi cAdvisor dùng **containerd factory** (Ubuntu 22.04+ với Docker containerd snapshotter), label `container_label_com_docker_compose_service` **không được export**. cAdvisor containerd factory chỉ đọc container metadata từ containerd, không đọc Docker labels. Filter đúng là dùng label `image` với regex match.
 >
-> **Bảng so sánh cách filter container:**
+> **Bảng so sánh cách filter container (containerd factory):**
 >
 > | Mục tiêu | Label filter | Ví dụ |
 > |---|---|---|
-> | Theo service Compose | `container_label_com_docker_compose_service` | `="shopapi"` |
-> | Theo image | `image=~".*pattern.*"` | `=~".*prometheus.*"` |
-> | Tất cả container thật | `image!=""` | — |
+> | Theo tên image | `image=~".*pattern.*"` | `=~".*shopapi.*"` |
+> | Tất cả Docker container | `image!=""` | — |
+> | Theo cgroup path | `id=~"/system.slice/docker-.+\\.scope"` | (lọc Docker containers) |
+>
+> **Lưu ý:** `container_label_com_docker_compose_service` chỉ có khi cAdvisor dùng **Docker factory** (không phải containerd factory). Trên Ubuntu 22.04+ với Docker containerd snapshotter, phải dùng filter theo `image`.
 
 **Query 5 — Prometheus scrape được bao nhiêu metric:**
 ```promql
@@ -1134,6 +1136,47 @@ docker compose logs grafana | grep -i "provision\|dashboard\|error"
 docker exec monitoring_grafana cat /var/lib/grafana/dashboards/monitoring-overview.json | python3 -m json.tool > /dev/null && echo "JSON hợp lệ" || echo "JSON lỗi"
 ```
 
+**Lỗi 5: Legend panel hiện chuỗi trống / Panel Network không có data**
+
+**Triệu chứng:**
+- Các time series panel (CPU, Memory, Network) hiện data nhưng legend trống hoặc ghi `{{}}`
+- Panel Network (RX/TX) không có data dù CPU/Memory bình thường
+- Query `{container_label_com_docker_compose_service="shopapi"}` trả về empty
+
+**Nguyên nhân:**
+cAdvisor với `--containerd` flag (containerd factory) **không export Docker Compose labels** như `com.docker.compose.service`. Labels này chỉ tồn tại khi cAdvisor dùng Docker factory (không có `--containerd` flag).
+
+Với containerd factory, container chỉ được nhận dạng qua:
+- `image` label: tên image đầy đủ (ví dụ: `docker.io/library/monitoring_stack_gold-shopapi:latest`)
+- `name` label: container ID hash (không thân thiện)
+- `id` label: cgroup path (ví dụ: `/system.slice/docker-{hash}.scope`)
+
+**Fix — dùng `label_replace` để trích tên service từ `image`:**
+
+```promql
+# Thay vì: rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service="shopapi"}[5m])
+# Dùng:
+rate(container_cpu_usage_seconds_total{image=~".*shopapi.*"}[5m])
+
+# Cho legend thân thiện, dùng label_replace:
+label_replace(
+  rate(container_cpu_usage_seconds_total{image!=""}[5m]) * 100,
+  "service", "$1", "image", ".*/([^/:]+):.*"
+)
+```
+
+Legend template sau khi dùng `label_replace`: `{{service}}`
+
+**Fix cho panel Network (không có data):**
+
+Network metrics với containerd factory dùng cgroup `id` pattern thay vì `image` filter:
+```promql
+# Filter đúng cho Docker containers:
+rate(container_network_receive_bytes_total{id=~"/system.slice/docker-.+\\.scope", interface!="lo"}[5m])
+```
+
+`/system.slice/docker-{hash}.scope` là cgroup path cố định mà Docker daemon tạo cho mỗi container. `interface!="lo"` loại bỏ loopback traffic.
+
 **Lỗi 4: Grafana khởi động rất chậm**
 
 Bình thường. Lần đầu Grafana cần ~20-30 giây để:
@@ -1154,11 +1197,12 @@ docker compose logs -f grafana | grep -E "started|ready|listen|error"
 
 2. **Duplicate panel CPU** → đổi query thành chỉ lấy `shopapi`:
    ```promql
-   rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service="shopapi"}[5m]) * 100
+   rate(container_cpu_usage_seconds_total{image=~".*shopapi.*"}[5m]) * 100
    ```
    → thấy sự khác biệt giữa filter toàn bộ và filter 1 service cụ thể.
+   > **Lưu ý:** Với cAdvisor containerd factory, filter phải dùng `image=~".*shopapi.*"` thay vì `container_label_com_docker_compose_service="shopapi"` vì Docker Compose labels không được export qua containerd interface.
 
-3. **Tạo panel Alert threshold**: Duplicate panel Memory → vào Panel tab → Thresholds → thêm threshold 500MB màu vàng, 1GB màu đỏ → quan sát đường kẻ ngang trên biểu đồ.
+3. **Tạo panel Alert threshold**: Duplicate panel Memory → vào Panel tab → Thresholds → thêm threshold 500MB màu vàng, 1GB màu đỏ → **quan trọng**: trong phần "Graph styles" tìm mục **"Thresholds style"** và chọn **"As lines"** (mặc định là Off) → mới thấy đường kẻ ngang màu vàng/đỏ xuất hiện trên biểu đồ.
 
 4. **Export dashboard**: Click **Share** (icon trên dashboard title) → **Export** → **Save to file** → xem file JSON được tạo ra. Đây chính xác là format của `monitoring-overview.json`.
 
