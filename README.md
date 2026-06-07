@@ -208,28 +208,93 @@ dotnet_collection_count_total         → số lần GC chạy
 dotnet_total_memory_bytes             → tổng memory được allocate
 ```
 
-**Custom metrics cho nghiệp vụ:**
+**Custom metrics cho nghiệp vụ — Tại sao cần? Khi nào dùng?**
+
+Built-in metrics (`http_request_duration_seconds`, `process_cpu_seconds_total`...) chỉ trả lời được câu hỏi về **infrastructure**: app có chạy không, có chậm không, có tốn RAM không.
+
+Nhưng chúng **không thể** trả lời câu hỏi kinh doanh:
+
+> *"Có bao nhiêu đơn hàng bị từ chối vì hết hàng trong 10 phút qua?"*
+> *"Tỷ lệ thanh toán thất bại đang tăng hay giảm?"*
+> *"Bao nhiêu user đang ở trong luồng checkout nhưng chưa hoàn tất?"*
+
+Đây là lý do **custom metrics** tồn tại — để đưa logic nghiệp vụ vào hệ thống monitoring.
+
+**Bộ câu hỏi xác định khi nào cần custom metric:**
+
+| Câu hỏi | Nếu YES → cần custom metric |
+|---|---|
+| Built-in metrics có trả lời được không? | Nếu NO |
+| Đây có phải thông tin cần alert khi có vấn đề? | Nếu YES |
+| Team business/product có cần xem số này không? | Nếu YES |
+| Nếu con số này bất thường, bạn có muốn biết ngay không? | Nếu YES |
+
+---
+
+**Use case thực tế theo domain:**
+
+**E-commerce (ShopApi context):**
+```
+shopapi_orders_total{status}         → phát hiện spike lỗi "hết hàng" = có bug inventory
+shopapi_checkout_abandoned_total     → user vào checkout nhưng không hoàn thành = UX có vấn đề
+shopapi_coupon_applied_total{valid}  → tỷ lệ mã giảm giá hết hạn bị apply = bug validation
+shopapi_payment_duration_seconds     → payment gateway chậm → cần switch provider
+```
+
+**Fintech / Ngân hàng:**
+```
+bank_transactions_total{type, status}    → giao dịch thất bại tăng đột biến = sự cố core banking
+bank_fraud_score_histogram               → phân phối fraud score → điều chỉnh threshold
+bank_kyc_pending_gauge                   → số hồ sơ KYC đang chờ xử lý → cần thêm nhân sự
+bank_settlement_delay_seconds            → độ trễ quyết toán → vi phạm SLA với đối tác
+```
+
+**SaaS / B2B:**
+```
+saas_trial_conversions_total             → tỷ lệ chuyển đổi từ trial → paid
+saas_api_quota_usage{tenant_id}          → tenant nào đang dùng gần đến giới hạn → upsell
+saas_background_job_duration_seconds     → job email/report chậm → user không nhận được thông báo
+saas_feature_flag_evaluations_total      → feature nào đang được dùng nhiều nhất
+```
+
+**Healthcare / EHR:**
+```
+ehr_prescription_pending_gauge           → đơn thuốc chờ duyệt → bác sĩ bị quá tải
+ehr_critical_alert_delivery_seconds      → thời gian gửi cảnh báo nguy hiểm đến bác sĩ
+ehr_sync_lag_seconds{source}             → dữ liệu từ thiết bị y tế bị trễ → nguy hiểm
+```
+
+**Nguyên tắc thiết kế custom metric:**
+
+1. **Đặt tên theo chuẩn** `{app}_{domain}_{action}_{unit}` — ví dụ: `shopapi_order_processing_duration_seconds`
+2. **Labels phải có cardinality thấp** — `{status="success|failed"}` ✅, `{user_id="123456"}` ❌ (hàng triệu giá trị → Prometheus OOM)
+3. **Dùng đúng loại metric** — Counter cho thứ chỉ tăng, Gauge cho thứ tăng giảm, Histogram để tính P95/P99
+4. **Đừng đo quá nhiều** — mỗi metric thêm vào là chi phí memory và scrape time. Chỉ đo thứ mà bạn sẽ thực sự dùng để ra quyết định
+
+---
+
+**Triển khai trong ShopApi** (`src/ShopApi/Metrics/ShopMetrics.cs`):
+
 ```csharp
-// Khai báo static — tạo 1 lần, dùng mãi
+// Khai báo static — tạo 1 lần khi app khởi động, dùng suốt lifecycle
 public static class ShopMetrics
 {
-    // Counter: đếm tổng đơn hàng, chia theo status
+    // Counter: đếm tổng đơn hàng, chia theo kết quả xử lý
+    // WHY: HTTP 400 không nói được lý do fail là hết hàng hay product không tồn tại
     public static readonly Counter OrdersTotal = Metrics
         .CreateCounter("shopapi_orders_total", "Tổng số đơn hàng",
-            labelNames: new[] { "status" });   // label: success | failed
+            labelNames: new[] { "status" });
+    // status: created | failed_empty | failed_not_found | failed_stock
 
-    // Gauge: số connection DB đang active
-    public static readonly Gauge DbConnectionsActive = Metrics
-        .CreateGauge("shopapi_db_connections_active", "DB connections đang dùng");
-
-    // Histogram: đo thời gian xử lý order (ms)
-    // Buckets định nghĩa các "nhóm" để tính percentile
-    public static readonly Histogram OrderProcessingMs = Metrics
-        .CreateHistogram("shopapi_order_processing_ms", "Thời gian xử lý đơn hàng (ms)",
+    // Histogram: đo thời gian xử lý toàn bộ order — từ validate đến SaveChanges
+    // WHY: http_request_duration_seconds đo từ nhận request đến trả response,
+    //       không tách được phần nào tốn thời gian (validate? query DB? ghi DB?)
+    public static readonly Histogram OrderProcessingDuration = Metrics
+        .CreateHistogram("shopapi_order_processing_duration_seconds",
+            "Thời gian xử lý đơn hàng end-to-end",
             new HistogramConfiguration
             {
-                Buckets = Histogram.LinearBuckets(start: 10, width: 50, count: 10)
-                // → tạo buckets: 10, 60, 110, 160, 210, 260, 310, 360, 410, 460 ms
+                Buckets = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
             });
 }
 ```
@@ -238,18 +303,20 @@ public static class ShopMetrics
 ```csharp
 public async Task<IActionResult> CreateOrder([FromBody] CreateOrderDto dto)
 {
-    using var timer = ShopMetrics.OrderProcessingMs.NewTimer(); // tự động đo thời gian
-    try
+    // NewTimer() tự động ghi duration vào histogram khi kết thúc using block
+    // Dù return ở đâu (success/fail/exception), timer vẫn được ghi
+    using var timer = ShopMetrics.OrderProcessingDuration.NewTimer();
+
+    if (req.Items.Count == 0)
     {
-        var order = await _orderService.CreateAsync(dto);
-        ShopMetrics.OrdersTotal.WithLabels("success").Inc();   // tăng counter
-        return Ok(order);
+        ShopMetrics.OrdersTotal.WithLabels("failed_empty").Inc();
+        return BadRequest(new { message = "Giỏ hàng trống" });
     }
-    catch (Exception ex)
-    {
-        ShopMetrics.OrdersTotal.WithLabels("failed").Inc();    // đếm lỗi riêng
-        throw;
-    }
+
+    // ... xử lý ...
+
+    ShopMetrics.OrdersTotal.WithLabels("created").Inc();
+    return CreatedAtAction(...);
 }
 ```
 
