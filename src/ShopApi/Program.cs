@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
+using Prometheus;
 using ShopApi.Data;
 using ShopApi.Services;
 
@@ -116,9 +117,19 @@ app.UseSwaggerUI(c =>
 });
 
 app.UseCors();
+
+// [BẮT BUỘC] Đặt sau UseCors, trước UseAuthentication
+// Tự động đo duration + count mọi HTTP request, gắn label: method, route, status_code
+// Tạo ra sẵn: http_requests_received_total, http_request_duration_seconds, http_requests_in_progress
+app.UseHttpMetrics();
+
 app.UseAuthentication(); // [BẮT BUỘC] phải trước UseAuthorization
 app.UseAuthorization();
 app.MapControllers();
+
+// [BẮT BUỘC] Endpoint Prometheus sẽ scrape — không cần auth, Prometheus gọi từ internal network
+// Truy cập thủ công: http://192.168.1.35:5065/metrics
+app.MapMetrics("/metrics");
 
 // Health check — K6 ping trước khi test
 app.MapGet("/health", () => new { status = "healthy", timestamp = DateTime.UtcNow });

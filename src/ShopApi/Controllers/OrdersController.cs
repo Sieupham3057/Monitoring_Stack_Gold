@@ -2,9 +2,11 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Prometheus;
 using ShopApi.Data;
 using ShopApi.DTOs;
 using ShopApi.Entities;
+using ShopApi.Metrics;
 
 namespace ShopApi.Controllers;
 
@@ -21,8 +23,15 @@ public class OrdersController(AppDbContext db) : ControllerBase
     [HttpPost]
     public async Task<IActionResult> CreateOrder(CreateOrderRequest req)
     {
+        // NewTimer() tự động ghi duration vào histogram khi Dispose (kết thúc using block)
+        // Đo toàn bộ thời gian: từ validate → query DB → SaveChanges
+        using var timer = ShopMetrics.OrderProcessingDuration.NewTimer();
+
         if (req.Items.Count == 0)
+        {
+            ShopMetrics.OrdersTotal.WithLabels("failed_empty").Inc();
             return BadRequest(new { message = "Giỏ hàng trống" });
+        }
 
         // Lấy tất cả product trong 1 query thay vì N queries
         var productIds = req.Items.Select(i => i.ProductId).Distinct().ToList();
@@ -34,34 +43,39 @@ public class OrdersController(AppDbContext db) : ControllerBase
         foreach (var item in req.Items)
         {
             if (!products.TryGetValue(item.ProductId, out var product))
+            {
+                ShopMetrics.OrdersTotal.WithLabels("failed_not_found").Inc();
                 return BadRequest(new { message = $"Sản phẩm #{item.ProductId} không tồn tại" });
+            }
 
             if (product.Stock < item.Quantity)
+            {
+                ShopMetrics.OrdersTotal.WithLabels("failed_stock").Inc();
                 return BadRequest(new { message = $"Sản phẩm '{product.Name}' không đủ hàng. Còn: {product.Stock}" });
+            }
         }
 
         // Tạo order
         var order = new Order { UserId = CurrentUserId };
-        var orderItems = new List<OrderItem>();
 
         foreach (var item in req.Items)
         {
             var product = products[item.ProductId];
             product.Stock -= item.Quantity; // Giảm tồn kho
 
-            var orderItem = new OrderItem
+            order.Items.Add(new OrderItem
             {
                 ProductId = item.ProductId,
                 Quantity = item.Quantity,
                 UnitPrice = product.Price
-            };
-            order.Items.Add(orderItem);
+            });
             order.TotalAmount += product.Price * item.Quantity;
         }
 
         db.Orders.Add(order);
         await db.SaveChangesAsync();
 
+        ShopMetrics.OrdersTotal.WithLabels("created").Inc();
         return CreatedAtAction(nameof(GetById), new { id = order.Id }, new { order.Id, order.TotalAmount, order.Status });
     }
 

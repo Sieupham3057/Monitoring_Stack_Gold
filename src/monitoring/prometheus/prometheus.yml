@@ -73,15 +73,18 @@ scrape_configs:
           host: '192.168.1.35'
 
   # ----------------------------------------------------------
-  # JOB 3: ShopApi — sẽ enable ở Bước 7
-  # [TÙY CHỌN] Chưa cần bây giờ, để comment sẵn để nhớ
+  # JOB 3: ShopApi — expose /metrics qua prometheus-net
+  # [BẮT BUỘC] Bước 7: scrape metrics nghiệp vụ từ ShopApi
+  # Metrics có sẵn: http_requests_received_total, http_request_duration_seconds,
+  #                 shopapi_orders_total, shopapi_order_processing_duration_seconds,
+  #                 shopapi_auth_logins_total, shopapi_product_queries_total
   # ----------------------------------------------------------
-  # - job_name: 'shopapi'
-  #   static_configs:
-  #     - targets: ['shopapi:8080']
-  #       labels:
-  #         app: 'shopapi'
-  #         env: 'production'
+  - job_name: 'shopapi'
+    static_configs:
+      - targets: ['shopapi:8080']
+        labels:
+          app: 'shopapi'
+          env: 'production'
 
   # ----------------------------------------------------------
   # JOB 4: Node Exporter — metrics OS của host (Linux)

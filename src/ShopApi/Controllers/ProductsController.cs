@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using ShopApi.Data;
 using ShopApi.DTOs;
 using ShopApi.Entities;
+using ShopApi.Metrics;
 
 namespace ShopApi.Controllers;
 
@@ -20,6 +21,8 @@ public class ProductsController(AppDbContext db) : ControllerBase
         [FromQuery] int pageSize = 20,
         [FromQuery] int? categoryId = null)
     {
+        ShopMetrics.ProductQueriesTotal.Inc();
+
         var query = db.Products.Include(p => p.Category).AsQueryable();
 
         if (categoryId.HasValue)

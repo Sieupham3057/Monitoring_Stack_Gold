@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using ShopApi.Data;
 using ShopApi.DTOs;
 using ShopApi.Entities;
+using ShopApi.Metrics;
 using ShopApi.Services;
 
 namespace ShopApi.Controllers;
@@ -16,7 +17,10 @@ public class AuthController(AppDbContext db, JwtService jwtService) : Controller
     public async Task<IActionResult> Register(RegisterRequest req)
     {
         if (await db.Users.AnyAsync(u => u.Username == req.Username))
+        {
+            ShopMetrics.AuthRegistrationsTotal.WithLabels("conflict").Inc();
             return Conflict(new { message = "Username đã tồn tại" });
+        }
 
         var user = new User
         {
@@ -28,6 +32,7 @@ public class AuthController(AppDbContext db, JwtService jwtService) : Controller
         db.Users.Add(user);
         await db.SaveChangesAsync();
 
+        ShopMetrics.AuthRegistrationsTotal.WithLabels("success").Inc();
         var (token, expiresAt) = jwtService.GenerateToken(user);
         return Ok(new AuthResponse(token, user.Username, expiresAt));
     }
@@ -40,8 +45,12 @@ public class AuthController(AppDbContext db, JwtService jwtService) : Controller
         var user = await db.Users.FirstOrDefaultAsync(u => u.Username == req.Username);
 
         if (user is null || !BCrypt.Net.BCrypt.Verify(req.Password, user.PasswordHash))
+        {
+            ShopMetrics.AuthLoginsTotal.WithLabels("failed").Inc();
             return Unauthorized(new { message = "Sai tên đăng nhập hoặc mật khẩu" });
+        }
 
+        ShopMetrics.AuthLoginsTotal.WithLabels("success").Inc();
         var (token, expiresAt) = jwtService.GenerateToken(user);
         return Ok(new AuthResponse(token, user.Username, expiresAt));
     }
