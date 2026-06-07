@@ -13,6 +13,7 @@
 - [Khái niệm quan trọng](#khái-niệm-quan-trọng--tech-lead-phải-biết)
 - [Thứ tự học đề xuất](#thứ-tự-học-đề-xuất)
 - [Môi trường](#môi-trường)
+- [.NET Metrics — Expose ra Prometheus](#net-metrics--expose-ra-prometheus)
 - **Hướng dẫn triển khai từng bước**
   - [Bước 1: Tạo ShopApi (.NET 8)](#-bước-1-tạo-shopapi-net-8)
   - [Bước 2: Prometheus + cAdvisor bằng Docker Compose](#-bước-2-prometheus--cadvisor-bằng-docker-compose)
@@ -148,6 +149,241 @@ dotnet run
 
 ---
 
+## .NET Metrics — Expose ra Prometheus
+
+### Tại sao cần expose `/metrics` từ app?
+
+cAdvisor chỉ thấy metrics **bên ngoài container**: CPU, RAM, Network của cả process.
+Nó **không biết** bên trong app đang xử lý bao nhiêu request/giây, có bao nhiêu đơn hàng lỗi, hay database pool đang dùng bao nhiêu connection.
+
+Để Prometheus biết được những thứ đó, **chính app phải tự expose ra**:
+
+```
+Prometheus ──(scrape /metrics)──► ShopApi
+                                  (app tự tính toán và trả về metrics của chính nó)
+```
+
+---
+
+### Bốn loại metric cơ bản
+
+Hiểu 4 loại này trước khi đọc code — đây là nền tảng của mọi monitoring system:
+
+| Loại | Đặc điểm | Ví dụ thực tế |
+|---|---|---|
+| **Counter** | Chỉ tăng, không bao giờ giảm | Tổng request, tổng lỗi, tổng đơn hàng |
+| **Gauge** | Tăng giảm tùy thời điểm | Active connections, queue size, RAM đang dùng |
+| **Histogram** | Đo phân phối giá trị → tính P95/P99 | Request duration, response size |
+| **Summary** | Giống Histogram nhưng tính percentile phía **client** (app) | Ít dùng hơn, tốn CPU hơn |
+
+> **Tech Lead cần nhớ:** Counter dùng `rate()` trong PromQL để ra req/giây. Histogram dùng `histogram_quantile(0.95, ...)` để ra P95 latency. Gauge dùng trực tiếp.
+
+---
+
+### Hai cách expose metrics trong .NET
+
+#### Cách 1 — `prometheus-net` (đơn giản, thuần Prometheus)
+
+**Khi nào dùng:** Dự án chỉ dùng Prometheus, không cần multi-backend, muốn setup nhanh.
+
+**Cài NuGet:**
+```xml
+<PackageReference Include="prometheus-net.AspNetCore" Version="8.*" />
+```
+
+**Đăng ký trong `Program.cs`:**
+```csharp
+// [BẮT BUỘC] Đăng ký metrics middleware
+app.UseHttpMetrics();          // tự động đo duration, count mọi HTTP request
+app.MapMetrics("/metrics");    // expose endpoint /metrics cho Prometheus scrape
+```
+
+**Built-in metrics có sẵn ngay** (không cần code thêm):
+```
+http_requests_received_total          → tổng request theo method, route, status code
+http_request_duration_seconds         → histogram latency (dùng để tính P95/P99)
+process_cpu_seconds_total             → CPU của .NET process
+process_resident_memory_bytes         → RAM đang dùng
+dotnet_collection_count_total         → số lần GC chạy
+dotnet_total_memory_bytes             → tổng memory được allocate
+```
+
+**Custom metrics cho nghiệp vụ:**
+```csharp
+// Khai báo static — tạo 1 lần, dùng mãi
+public static class ShopMetrics
+{
+    // Counter: đếm tổng đơn hàng, chia theo status
+    public static readonly Counter OrdersTotal = Metrics
+        .CreateCounter("shopapi_orders_total", "Tổng số đơn hàng",
+            labelNames: new[] { "status" });   // label: success | failed
+
+    // Gauge: số connection DB đang active
+    public static readonly Gauge DbConnectionsActive = Metrics
+        .CreateGauge("shopapi_db_connections_active", "DB connections đang dùng");
+
+    // Histogram: đo thời gian xử lý order (ms)
+    // Buckets định nghĩa các "nhóm" để tính percentile
+    public static readonly Histogram OrderProcessingMs = Metrics
+        .CreateHistogram("shopapi_order_processing_ms", "Thời gian xử lý đơn hàng (ms)",
+            new HistogramConfiguration
+            {
+                Buckets = Histogram.LinearBuckets(start: 10, width: 50, count: 10)
+                // → tạo buckets: 10, 60, 110, 160, 210, 260, 310, 360, 410, 460 ms
+            });
+}
+```
+
+**Dùng trong `OrdersController.cs`:**
+```csharp
+public async Task<IActionResult> CreateOrder([FromBody] CreateOrderDto dto)
+{
+    using var timer = ShopMetrics.OrderProcessingMs.NewTimer(); // tự động đo thời gian
+    try
+    {
+        var order = await _orderService.CreateAsync(dto);
+        ShopMetrics.OrdersTotal.WithLabels("success").Inc();   // tăng counter
+        return Ok(order);
+    }
+    catch (Exception ex)
+    {
+        ShopMetrics.OrdersTotal.WithLabels("failed").Inc();    // đếm lỗi riêng
+        throw;
+    }
+}
+```
+
+**Query PromQL sau khi có data:**
+```promql
+# Req/giây của ShopApi (tính trong 5 phút gần nhất)
+rate(http_requests_received_total{job="shopapi"}[5m])
+
+# P95 latency của endpoint tạo order
+histogram_quantile(0.95,
+  rate(http_request_duration_seconds_bucket{handler="/api/orders"}[5m])
+)
+
+# Tổng đơn hàng thành công theo phút
+rate(shopapi_orders_total{status="success"}[1m]) * 60
+
+# Tỷ lệ lỗi
+rate(shopapi_orders_total{status="failed"}[5m])
+/ rate(shopapi_orders_total[5m]) * 100
+```
+
+---
+
+#### Cách 2 — OpenTelemetry (chuẩn industry, vendor-neutral)
+
+**Khi nào dùng:** Dự án cần gửi telemetry tới nhiều backend (vừa Prometheus, vừa Jaeger, vừa Azure Monitor...). Đây là hướng Microsoft khuyến nghị cho .NET 8+.
+
+**Cài NuGet:**
+```xml
+<PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.*" />
+<PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.*" />
+<PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="1.*" />
+<PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.*-rc*" />
+```
+
+**Đăng ký trong `Program.cs`:**
+```csharp
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(metrics => metrics
+        // [BẮT BUỘC] Metrics HTTP của ASP.NET Core (request count, duration)
+        .AddAspNetCoreInstrumentation()
+        // [KHUYẾN NGHỊ] GC, thread pool, exception count của .NET runtime
+        .AddRuntimeInstrumentation()
+        // [BẮT BUỘC] Expose /metrics endpoint cho Prometheus
+        .AddPrometheusExporter()
+        // [TÙY CHỌN] Đăng ký custom Meter của bạn
+        .AddMeter("ShopApi")
+    );
+
+// Đăng ký endpoint scrape
+app.MapPrometheusScrapingEndpoint("/metrics");
+```
+
+**Custom metrics dùng `System.Diagnostics.Metrics` (built-in .NET 6+):**
+```csharp
+// Meter là "factory" tạo ra các instrument đo lường
+// Tên meter phải khớp với .AddMeter("ShopApi") ở trên
+public class OrderMetrics
+{
+    private readonly Counter<long> _ordersTotal;
+    private readonly Histogram<double> _processingMs;
+    private readonly ObservableGauge<int> _activeConnections;
+
+    public OrderMetrics(IMeterFactory meterFactory)
+    {
+        // [KHUYẾN NGHỊ] Dùng IMeterFactory thay vì new Meter() trực tiếp
+        // để tích hợp với DI và lifecycle management
+        var meter = meterFactory.Create("ShopApi");
+
+        _ordersTotal = meter.CreateCounter<long>(
+            "shopapi.orders.total",           // tên theo chuẩn OpenTelemetry: dùng dấu chấm
+            unit: "orders",
+            description: "Tổng số đơn hàng");
+
+        _processingMs = meter.CreateHistogram<double>(
+            "shopapi.order.processing_duration",
+            unit: "ms",
+            description: "Thời gian xử lý đơn hàng");
+
+        // ObservableGauge: tự động gọi callback mỗi khi scrape
+        _activeConnections = meter.CreateObservableGauge<int>(
+            "shopapi.db.connections_active",
+            observeValue: () => DbConnectionPool.ActiveCount,  // đọc giá trị hiện tại
+            unit: "connections");
+    }
+
+    public void RecordOrder(string status, double durationMs)
+    {
+        _ordersTotal.Add(1, new TagList { { "status", status } });
+        _processingMs.Record(durationMs, new TagList { { "status", status } });
+    }
+}
+```
+
+**Đăng ký DI:**
+```csharp
+builder.Services.AddSingleton<OrderMetrics>();
+```
+
+---
+
+### So sánh hai cách
+
+| Tiêu chí | `prometheus-net` | OpenTelemetry |
+|---|---|---|
+| **Setup** | Nhanh, ít code | Phức tạp hơn một chút |
+| **API** | Prometheus-specific | Chuẩn OpenTelemetry (vendor-neutral) |
+| **Multi-backend** | Chỉ Prometheus | Prometheus + Jaeger + Azure + OTLP... |
+| **Built-in metrics** | Tốt (process, GC, HTTP) | Rất tốt + runtime instrumentation |
+| **Microsoft hỗ trợ** | Community | Chính thức (Microsoft là contributor) |
+| **Khi nào chọn** | Stack thuần Prometheus | Muốn thêm tracing, hoặc đa cloud |
+
+> **Khuyến nghị cho dự án này:** Dùng **prometheus-net** cho Bước 7 vì đơn giản, đủ dùng, và thấy rõ cơ chế. Sau khi hiểu xong, nâng lên OpenTelemetry là dễ dàng.
+
+---
+
+### Prometheus scrape ShopApi như thế nào?
+
+Sau khi ShopApi expose `/metrics`, cập nhật `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: 'shopapi'
+    static_configs:
+      - targets: ['shopapi:8080']   # tên service trong docker-compose
+        labels:
+          app: 'shopapi'
+          env: 'production'
+```
+
+Prometheus sẽ gọi `http://shopapi:8080/metrics` mỗi 15s và lưu toàn bộ metrics vào TSDB.
+
+---
+
 ## Thứ tự học đề xuất
 
 | # | Tên bước | Branch | Trạng thái |
@@ -158,7 +394,7 @@ dotnet run
 | 4 | Cấu hình AlertManager (alert rule + Slack notification) | `buoc-4-alertmanager-slack` | ⬜ Todo |
 | 5 | Cài InfluxDB, viết K6 script load test ShopApi | `buoc-5-influxdb-k6-loadtest` | ⬜ Todo |
 | 6 | Kết nối Grafana → InfluxDB, xem P95/P99 của K6 | `buoc-6-grafana-influxdb-k6-metrics` | ⬜ Todo |
-| 7 | Expose .NET metrics ra Prometheus (prometheus-net) | `buoc-7-dotnet-prometheus-metrics` | ⬜ Todo |
+| 7 | Expose .NET metrics ra Prometheus (prometheus-net / OpenTelemetry) | `buoc-7-dotnet-prometheus-metrics` | ⬜ Todo |
 | 8 | Dashboard tổng hợp — 1 màn hình thấy toàn bộ hệ thống | `buoc-8-dashboard-tong-hop` | ⬜ Todo |
 
 ### Quy ước đặt tên branch
