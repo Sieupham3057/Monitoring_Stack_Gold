@@ -86,12 +86,71 @@ services:
     networks:
       - monitoring_net
 
+  # ----------------------------------------------------------
+  # PROMETHEUS — Thu thập & lưu metrics (time-series database)
+  # [BẮT BUỘC] Bước 2: engine cốt lõi của monitoring stack
+  # ----------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: monitoring_prometheus
+    ports:
+      # UI & API: http://192.168.1.35:9090
+      - "9090:9090"
+    volumes:
+      # [BẮT BUỘC] Mount file config — :ro = read-only để tránh container ghi đè
+      - ./src/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # [KHUYẾN NGHỊ] Persist data — restart không mất metrics history
+      - prometheus_data:/prometheus
+    command:
+      # [BẮT BUỘC] Chỉ định file config
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      # [BẮT BUỘC] Thư mục lưu data trên disk
+      - '--storage.tsdb.path=/prometheus'
+      # [KHUYẾN NGHỊ] Giữ data 15 ngày, sau đó tự xóa để tiết kiệm disk
+      - '--storage.tsdb.retention.time=15d'
+      # [TÙY CHỌN] Cho phép reload config qua HTTP POST /-/reload (không cần restart)
+      - '--web.enable-lifecycle'
+      # [TÙY CHỌN] Bật OTLP receiver nếu muốn nhận data từ OpenTelemetry
+      # - '--enable-feature=otlp-write-receiver'
+    restart: unless-stopped
+    networks:
+      - monitoring_net
+
+  # ----------------------------------------------------------
+  # cADVISOR — Container Advisor, thu thập metrics của Docker
+  # [BẮT BUỘC] Bước 2: nguồn metrics container cho Prometheus
+  # Tự động phát hiện tất cả container đang chạy trên host
+  # ----------------------------------------------------------
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: monitoring_cadvisor
+    ports:
+      # UI: http://192.168.1.35:8080
+      - "8080:8080"
+    volumes:
+      # [BẮT BUỘC] cAdvisor cần đọc thông tin từ host OS để lấy metrics
+      - /:/rootfs:ro                        # filesystem gốc của host
+      - /var/run:/var/run:ro                # socket Docker daemon
+      - /sys:/sys:ro                        # thông tin kernel, cgroups
+      - /var/lib/docker/:/var/lib/docker:ro # metadata các container
+      - /dev/disk/:/dev/disk:ro             # thông tin disk I/O
+    # [BẮT BUỘC] cAdvisor cần quyền truy cập sâu vào kernel
+    privileged: true
+    devices:
+      - /dev/kmsg   # đọc kernel message buffer để lấy OOM events
+    restart: unless-stopped
+    networks:
+      - monitoring_net
+
 # ============================================================
 # VOLUMES — lưu trữ persistent data ngoài container lifecycle
 # Xóa container vẫn giữ nguyên data
 # ============================================================
 volumes:
   sqlserver_data:
+    driver: local
+  # [BẮT BUỘC] Bước 2: lưu metrics của Prometheus
+  prometheus_data:
     driver: local
 
 # ============================================================

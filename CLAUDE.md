@@ -65,3 +65,23 @@
 - Mọi `docker-compose.yml`, config file đều phải có comment giải thích từng dòng
 - Ưu tiên dùng **Docker Compose** thay vì `docker run` riêng lẻ để dễ quản lý
 - Tất cả port mặc định cần được ghi rõ để tránh conflict
+
+---
+
+## Quy tắc viết hướng dẫn theo từng bước
+
+**Mỗi khi người dùng hoàn thành một bước học và chuyển sang bước tiếp theo:**
+
+1. **Tạo branch git mới** theo quy ước `buoc-{số}-{mô-tả-ngắn-không-dấu}` (ví dụ: `buoc-2-prometheus-cadvisor-docker`)
+2. **Commit toàn bộ thay đổi** của bước đó lên branch mới — mỗi bước = 1 branch riêng
+3. Viết hướng dẫn triển khai, thực hành và sử dụng của bước mới vào **cuối file README.md**
+4. Cập nhật **Mục lục** trong README.md để phản ánh nội dung mới
+5. Hướng dẫn phải bao gồm:
+   - Tổng quan: mục tiêu bước này dạy gì
+   - Cấu trúc file mới tạo ra
+   - Nội dung từng file config — giải thích từng dòng quan trọng
+   - Lệnh triển khai — giải thích từng lệnh
+   - Kiểm tra xác nhận hệ thống chạy đúng
+   - Thực hành: bài tập khám phá để hiểu sâu hơn
+6. Luôn dùng nhãn `[BẮT BUỘC]`, `[TÙY CHỌN]`, `[KHUYẾN NGHỊ]`
+7. Cập nhật trạng thái trong bảng **Thứ tự học đề xuất** (⬜ Todo → ✅ Done)
