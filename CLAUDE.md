@@ -85,3 +85,4 @@
    - Thực hành: bài tập khám phá để hiểu sâu hơn
 6. Luôn dùng nhãn `[BẮT BUỘC]`, `[TÙY CHỌN]`, `[KHUYẾN NGHỊ]`
 7. Cập nhật trạng thái trong bảng **Thứ tự học đề xuất** (⬜ Todo → ✅ Done)
+8. **Mọi thay đổi file config thực tế (docker-compose.yml, prometheus.yml, ...) phải được đồng bộ ngay vào ví dụ tương ứng trong README.md** — không để tài liệu lạc hậu so với code thực tế. Cập nhật ngay, không hỏi lại.
