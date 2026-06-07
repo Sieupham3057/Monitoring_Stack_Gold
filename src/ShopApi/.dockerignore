@@ -1,0 +1,17 @@
+# Loại bỏ build artifacts — không copy vào Docker image
+# Giúp build nhanh hơn và tránh conflict với build bên trong container
+bin/
+obj/
+
+# Visual Studio files không cần thiết
+.vs/
+*.user
+*.suo
+
+# Git files
+.git/
+.gitignore
+
+# Docker files chính nó — không cần copy vào image
+Dockerfile
+.dockerignore
