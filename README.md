@@ -740,3 +740,139 @@ docker run --rm \
 4. Mở cAdvisor UI (`http://192.168.1.35:8080`) → click vào container `monitoring_shopapi` → quan sát biểu đồ CPU/Memory thời gian thực
 
 **Kết quả bước 2:** Prometheus đang thu thập metrics từ cAdvisor mỗi 15 giây, bạn có thể query bằng PromQL. Bước 3 sẽ kết nối Grafana để vẽ dashboard trực quan hơn.
+
+---
+
+#### Troubleshooting — cAdvisor lỗi permission với non-root user
+
+Nếu bạn chạy với user không phải `root` (ví dụ user `bank`), cAdvisor hay gặp lỗi permission. Có **3 nguyên nhân độc lập**, mỗi cái có cách fix riêng.
+
+---
+
+**Bước 0 — Chẩn đoán: lỗi thuộc loại nào?**
+
+```bash
+# Xem log cAdvisor ngay sau khi start
+docker compose logs cadvisor 2>&1 | head -50
+
+# Các pattern lỗi phổ biến:
+# "permission denied"  → Nguyên nhân 1 hoặc 3
+# "no such file"       → Nguyên nhân 2 (cgroup v2)
+# "operation not permitted" → Nguyên nhân 3 (AppArmor)
+```
+
+---
+
+**Nguyên nhân 1 — User không có quyền chạy Docker** *(phổ biến nhất)*
+
+**Tại sao xảy ra:**
+Docker daemon chạy dưới quyền `root`. Để user thường (`bank`) chạy `docker compose`, họ phải thuộc group `docker`. Nếu không → mọi lệnh `docker` đều báo `permission denied`.
+
+`privileged: true` trong docker-compose chỉ cấp quyền **bên trong container**, không liên quan đến quyền của user chạy lệnh docker trên host.
+
+```bash
+# Kiểm tra user hiện tại có trong group docker chưa
+groups $USER
+# Nếu thấy "docker" trong danh sách → đã đúng
+# Nếu không thấy → cần fix
+
+# Fix: thêm user hiện tại vào group docker
+sudo usermod -aG docker $USER
+
+# Áp dụng ngay mà không cần logout
+newgrp docker
+
+# Xác nhận lại
+groups $USER   # phải thấy "docker"
+docker ps      # phải chạy được không cần sudo
+```
+
+> Nếu dùng `newgrp docker` mà vẫn lỗi → logout và SSH lại để session nhận group mới.
+
+---
+
+**Nguyên nhân 2 — cgroup v2 (Ubuntu 22.04+ / Debian 11+)**
+
+**Tại sao xảy ra:**
+Ubuntu 22.04 trở lên dùng **cgroup v2** thay vì v1. cAdvisor cần mount thêm đường dẫn `/sys/fs/cgroup` để đọc được resource limits. Thiếu mount này → metrics CPU/memory của container bị trống hoặc báo lỗi.
+
+```bash
+# Kiểm tra VM đang dùng cgroup v1 hay v2
+stat -fc %T /sys/fs/cgroup/
+# "cgroup2fs" → đang dùng cgroup v2 → cần fix
+# "tmpfs"     → đang dùng cgroup v1 → không cần fix này
+```
+
+Nếu là cgroup v2, cập nhật service `cadvisor` trong `docker-compose.yml`:
+
+```yaml
+cadvisor:
+  image: gcr.io/cadvisor/cadvisor:v0.49.1
+  privileged: true
+  volumes:
+    - /:/rootfs:ro
+    - /var/run:/var/run:ro
+    - /sys:/sys:ro
+    - /var/lib/docker/:/var/lib/docker:ro
+    - /dev/disk/:/dev/disk:ro
+    # [BẮT BUỘC nếu dùng cgroup v2] Mount trực tiếp cgroup v2 hierarchy
+    - /sys/fs/cgroup:/sys/fs/cgroup:ro
+  devices:
+    - /dev/kmsg
+```
+
+---
+
+**Nguyên nhân 3 — AppArmor chặn privileged container** *(Ubuntu)*
+
+**Tại sao xảy ra:**
+Ubuntu có AppArmor — một hệ thống kiểm soát truy cập bắt buộc (MAC) ở kernel level. Dù container đã khai báo `privileged: true`, AppArmor vẫn có thể chặn một số syscall cụ thể mà cAdvisor cần (đọc `/proc`, `/sys`...).
+
+```bash
+# Kiểm tra AppArmor có đang chặn docker không
+sudo aa-status | grep docker
+# hoặc xem kernel log
+sudo dmesg | grep -i "apparmor.*DENIED" | tail -20
+```
+
+Nếu thấy `DENIED` liên quan đến docker/container, thêm vào `cadvisor` trong docker-compose:
+
+```yaml
+cadvisor:
+  image: gcr.io/cadvisor/cadvisor:v0.49.1
+  privileged: true
+  # [TÙY CHỌN] Tắt AppArmor confinement cho container này
+  # Chỉ dùng nếu đã xác nhận AppArmor là nguyên nhân
+  security_opt:
+    - apparmor:unconfined
+  volumes:
+    - /:/rootfs:ro
+    - /var/run:/var/run:ro
+    - /sys:/sys:ro
+    - /var/lib/docker/:/var/lib/docker:ro
+    - /dev/disk/:/dev/disk:ro
+  devices:
+    - /dev/kmsg
+```
+
+---
+
+**Checklist fix nhanh cho user `bank` (hoặc bất kỳ non-root user nào):**
+
+```bash
+# 1. Thêm vào docker group
+sudo usermod -aG docker $USER && newgrp docker
+
+# 2. Kiểm tra cgroup version
+stat -fc %T /sys/fs/cgroup/
+
+# 3. Restart cAdvisor sau khi fix
+docker compose restart cadvisor
+
+# 4. Xác nhận cAdvisor đang scrape được
+curl -s http://localhost:8080/metrics | grep container_cpu | head -5
+# Nếu thấy data → đã fix xong
+
+# 5. Xác nhận Prometheus thấy cAdvisor là UP
+curl -s http://localhost:9090/api/v1/targets | grep cadvisor
+```
