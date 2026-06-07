@@ -273,6 +273,10 @@
           "options": { "mode": "columns" }
         },
         {
+          "id": "merge",
+          "options": {}
+        },
+        {
           "id": "organize",
           "options": {
             "excludeByName": {
