@@ -372,13 +372,13 @@
         },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
-      "title": "Network Receive — bytes/sec theo container",
+      "title": "Network Receive — bytes/sec theo interface (host level)",
       "type": "timeseries",
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "label_replace(rate(container_network_receive_bytes_total{id=~\"/system.slice/docker-.+\\\\.scope\", interface!=\"lo\"}[5m]), \"service\", \"$1\", \"image\", \".*/([^/:]+):.*\")",
-          "legendFormat": "{{service}}",
+          "expr": "rate(container_network_receive_bytes_total{id=\"/\", interface!=\"lo\"}[5m])",
+          "legendFormat": "{{interface}}",
           "refId": "A"
         }
       ]
@@ -430,13 +430,13 @@
         },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
-      "title": "Network Transmit — bytes/sec theo container",
+      "title": "Network Transmit — bytes/sec theo interface (host level)",
       "type": "timeseries",
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "label_replace(rate(container_network_transmit_bytes_total{id=~\"/system.slice/docker-.+\\\\.scope\", interface!=\"lo\"}[5m]), \"service\", \"$1\", \"image\", \".*/([^/:]+):.*\")",
-          "legendFormat": "{{service}}",
+          "expr": "rate(container_network_transmit_bytes_total{id=\"/\", interface!=\"lo\"}[5m])",
+          "legendFormat": "{{interface}}",
           "refId": "A"
         }
       ]

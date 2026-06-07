@@ -933,8 +933,14 @@ Dashboard đã pre-built gồm **8 panel** sắp xếp theo grid 24 cột:
 
 | Panel | Query | Ý nghĩa |
 |---|---|---|
-| Network Receive | `rate(container_network_receive_bytes_total[5m])` | Bytes/sec nhận vào từng container |
-| Network Transmit | `rate(container_network_transmit_bytes_total[5m])` | Bytes/sec gửi ra từng container |
+| Network Receive | `rate(container_network_receive_bytes_total{id="/", interface!="lo"}[5m])` | Bytes/sec nhận vào theo interface của host |
+| Network Transmit | `rate(container_network_transmit_bytes_total{id="/", interface!="lo"}[5m])` | Bytes/sec gửi ra theo interface của host |
+
+> **Giới hạn của containerd factory:** cAdvisor với `--containerd` flag không export per-container network metrics. Toàn bộ network traffic chỉ được gán cho root cgroup `id="/"`. Dashboard hiển thị traffic theo network interface thay vì theo container:
+> - `ens33` = traffic ra ngoài internet/LAN
+> - `br-xxxxxxxx` = traffic nội bộ giữa các container trong Docker network
+>
+> Nếu muốn per-container network metrics, cần switch sang cAdvisor Docker factory (bỏ `--containerd` flag, nhưng sẽ mất khả năng thấy container metadata trên Ubuntu 22.04+).
 
 > **Legend template `{{container_label_com_docker_compose_service}}`** — label này do Docker Compose tự động gắn vào mỗi container. Khi cAdvisor dùng containerd factory, đây là label duy nhất chứa tên service thân thiện (shopapi, prometheus, grafana...).
 
