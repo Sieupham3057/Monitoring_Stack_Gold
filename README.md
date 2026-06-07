@@ -536,15 +536,26 @@ global:
   evaluation_interval: 15s  # Cứ 15s tính toán alert rules
 
 scrape_configs:
-  - job_name: 'prometheus'   # Prometheus tự monitor chính mình
+  # Job 1: Prometheus tự monitor chính mình
+  - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']
 
-  - job_name: 'cadvisor'     # metrics Docker containers
+  # Job 2: cAdvisor — metrics CPU/RAM/Network của Docker containers
+  - job_name: 'cadvisor'
     static_configs:
       - targets: ['cadvisor:8080']
         labels:
           host: '192.168.1.35'
+
+  # Job 3: ShopApi — metrics nghiệp vụ qua prometheus-net (thêm ở Bước 7)
+  # Expose tại: http://shopapi:8080/metrics
+  - job_name: 'shopapi'
+    static_configs:
+      - targets: ['shopapi:8080']
+        labels:
+          app: 'shopapi'
+          env: 'production'
 ```
 
 **Tại sao dùng `cadvisor:8080` thay vì `192.168.1.35:8080`?**
