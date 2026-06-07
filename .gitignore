@@ -1,0 +1,23 @@
+# .NET build outputs
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# macOS
+.DS_Store
+
+# Environment files
+*.env
+.env.local
+
+# Docker override files
+docker-compose.override.yml
+
+# Logs
+*.log
+
+# IDE
+.idea/
+*.swp
