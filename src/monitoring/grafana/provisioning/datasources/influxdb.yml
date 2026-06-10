@@ -1,0 +1,46 @@
+# ============================================================
+# GRAFANA DATASOURCE PROVISIONING — influxdb.yml
+# Tự động cấu hình InfluxDB datasource khi Grafana khởi động.
+# Dùng để hiển thị kết quả K6 load test trên Grafana dashboard.
+#
+# Đường dẫn trong container: /etc/grafana/provisioning/datasources/
+# ============================================================
+
+apiVersion: 1
+
+datasources:
+  # ----------------------------------------------------------
+  # DATASOURCE 2: InfluxDB v1.8 — Nhận data từ K6 load test
+  # [BẮT BUỘC] Bước 5: cần để xem metrics K6 trên Grafana
+  # InfluxDB v1 dùng InfluxQL (SQL-like), KHÔNG phải Flux
+  # ----------------------------------------------------------
+  - name: InfluxDB — K6
+    # [BẮT BUỘC] Loại datasource — dùng "influxdb" cho v1.x
+    type: influxdb
+
+    # [BẮT BUỘC] proxy = Grafana server gọi InfluxDB thay cho browser
+    access: proxy
+
+    # [BẮT BUỘC] URL nội bộ Docker — "influxdb" là tên service trong docker-compose
+    url: http://influxdb:8086
+
+    # [BẮT BUỘC] Tên database — phải khớp với INFLUXDB_DB trong docker-compose
+    database: k6
+
+    # [TÙY CHỌN] Không cần user/password vì INFLUXDB_HTTP_AUTH_ENABLED=false
+    # user: ""
+    # password: ""
+
+    # [KHUYẾN NGHỊ] uid cố định để dashboard JSON tham chiếu không bị lỗi sau restart
+    uid: influxdb-k6
+
+    # Không đặt làm default — Prometheus vẫn là datasource chính
+    isDefault: false
+
+    editable: true
+
+    jsonData:
+      # [BẮT BUỘC] Dùng InfluxQL (v1 query language), không phải Flux (v2)
+      version: InfluxQL
+      # [TÙY CHỌN] Interval gợi ý cho query — K6 scrape mỗi giây
+      timeInterval: "1s"

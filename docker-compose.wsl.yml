@@ -177,6 +177,34 @@ services:
   #     - monitoring_net
 
   # ----------------------------------------------------------
+  # INFLUXDB 1.8 — Time-series database nhận kết quả từ K6
+  # [BẮT BUỘC] Bước 5: lưu trữ metrics load test từ K6
+  # K6 dùng built-in output --out influxdb=http://localhost:8086/k6
+  # UI: http://localhost:8086 (không có GUI, dùng Grafana để xem)
+  # ----------------------------------------------------------
+  influxdb:
+    image: influxdb:1.8
+    container_name: monitoring_influxdb
+    ports:
+      # [BẮT BUỘC] Port mặc định InfluxDB
+      # K6 chạy ngoài container gọi: http://localhost:8086/k6
+      - "8086:8086"
+    environment:
+      # [BẮT BUỘC] Tạo database "k6" tự động khi container khởi động
+      # K6 sẽ ghi metrics vào database này
+      INFLUXDB_DB: k6
+      # [KHUYẾN NGHỊ] Tắt auth cho môi trường nghiên cứu — bật lên nếu production
+      INFLUXDB_HTTP_AUTH_ENABLED: "false"
+      # [TÙY CHỌN] Giữ data 30 ngày rồi tự xóa (tiết kiệm disk)
+      INFLUXDB_DATA_MAX_VALUES_PER_TAG: "0"
+    volumes:
+      # [KHUYẾN NGHỊ] Persist data — restart không mất kết quả load test
+      - influxdb_data:/var/lib/influxdb
+    restart: unless-stopped
+    networks:
+      - monitoring_net
+
+  # ----------------------------------------------------------
   # cADVISOR — Container Advisor, thu thập metrics của Docker
   # [BẮT BUỘC] Bước 2: nguồn metrics container cho Prometheus
   # Tự động phát hiện tất cả container đang chạy trên host
@@ -230,6 +258,9 @@ volumes:
     driver: local
   # [BẮT BUỘC] Bước 3: lưu cấu hình và dashboard của Grafana
   grafana_data:
+    driver: local
+  # [BẮT BUỘC] Bước 5: lưu kết quả load test K6 của InfluxDB
+  influxdb_data:
     driver: local
 
 # ============================================================

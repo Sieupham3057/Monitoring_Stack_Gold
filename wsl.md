@@ -20,6 +20,17 @@
 5. [Dashboard còn thiếu Panel nào quan trọng](#5-dashboard-còn-thiếu-panel-nào-quan-trọng)
 6. [Thêm Backend API mới — 3 bước + Troubleshooting](#6-thêm-backend-api-mới--chỉ-2-bước)
 7. [Quick Reference — Lệnh restart / reload hay dùng](#7-quick-reference--lệnh-restart--reload-hay-dùng)
+8. [Bước 5 — InfluxDB + K6 Load Test](#8-bước-5--influxdb--k6-load-test)
+   - 8.1 [Tổng quan kiến trúc K6 → InfluxDB → Grafana](#81-tổng-quan-kiến-trúc)
+   - 8.2 [Triển khai InfluxDB](#82-triển-khai-influxdb)
+   - 8.3 [Cài đặt K6 trên WSL](#83-cài-đặt-k6-trên-wsl)
+   - 8.4 [Chạy Load Test và xem kết quả trên Grafana](#84-chạy-load-test-và-xem-kết-quả)
+   - 8.5 [Các loại Load Test và khi nào dùng](#85-các-loại-load-test)
+9. [Kiểm tra ngưỡng server — Điều gì xảy ra khi nhiều request đồng thời](#9-kiểm-tra-ngưỡng-server)
+   - 9.1 [Các ngưỡng quan trọng cần theo dõi](#91-các-ngưỡng-quan-trọng)
+   - 9.2 [Patterns nguy hiểm — nhận diện và xử lý](#92-patterns-nguy-hiểm)
+   - 9.3 [Correlation Matrix — đọc nhiều panel cùng lúc](#93-correlation-matrix)
+   - 9.4 [Scaling Decision Tree — khi nào scale gì](#94-scaling-decision-tree)
 
 ---
 
@@ -961,14 +972,18 @@ curl -X POST http://admin:admin123@localhost:3000/api/admin/provisioning/dashboa
 curl -X POST http://admin:admin123@localhost:3000/api/admin/provisioning/datasources/reload
 ```
 
-**Khi nào restart Grafana:**
-| Tình huống | Dùng |
-|---|---|
-| Sửa file dashboard JSON (provisioning tự reload) | Không cần restart — Grafana watch file |
-| Thêm datasource mới vào provisioning | `curl .../datasources/reload` hoặc restart |
-| Sửa env var (GF_SECURITY_ADMIN_PASSWORD...) | `docker restart monitoring_grafana` |
-| Grafana UI bị trắng / không load | `docker restart monitoring_grafana` |
-| Cập nhật image Grafana version mới | `docker compose up -d grafana` |
+**Khi nào reload vs restart Grafana:**
+| Tình huống | Dùng | Lý do |
+|---|---|---|
+| Thêm file datasource mới vào `provisioning/datasources/` | `curl .../datasources/reload` | Grafana không tự pick up file mới khi đang chạy |
+| Sửa nội dung datasource đã có | `curl .../datasources/reload` | Grafana chỉ apply khi reload |
+| Sửa file dashboard JSON | Không cần — tự reload sau 30s | Grafana watch file changes cho dashboards |
+| Thêm file dashboard JSON mới | `curl .../dashboards/reload` hoặc chờ 30s | Tự reload theo `updateIntervalSeconds` |
+| Sửa env var (GF_SECURITY_ADMIN_PASSWORD...) | `docker restart monitoring_grafana` | Env var chỉ apply khi process restart |
+| Grafana UI bị trắng / không load | `docker restart monitoring_grafana` | |
+| Cập nhật image Grafana version mới | `docker compose up -d grafana` | |
+
+> **Lưu ý quan trọng:** `docker compose up -d` KHÔNG restart Grafana nếu config của service `grafana` trong docker-compose.wsl.yml không thay đổi. Thêm file provisioning mới → Grafana không tự biết → phải reload thủ công qua API.
 
 ---
 
@@ -1025,4 +1040,591 @@ curl -s http://localhost:5066/metrics | grep "http_requests_received_total"
 
 ---
 
-*Tạo: 2026-06-10 | Cập nhật: 2026-06-10 — Refactor sang multi-service (Template Variable `$service` + `group by (job)`). Thêm banking-api vào prometheus.wsl.yml và docker-compose.wsl.yml.*
+---
+
+## 8. Bước 5 — InfluxDB + K6 Load Test
+
+### 8.1 Tổng quan kiến trúc
+
+```
+K6 Script                InfluxDB 1.8             Grafana
+(load-test.js)  ──────►  database: k6   ──────►   K6 Dashboard
+                 write    port: 8086      query    (k6-dashboard-wsl.json)
+                          measurements:
+                          - http_req_duration
+                          - http_reqs
+                          - http_req_failed
+                          - vus
+                          - shopapi_*_duration (custom)
+```
+
+**K6 khác Prometheus ở điểm quan trọng:**
+- **Prometheus (PULL model)**: Prometheus chủ động scrape `/metrics` mỗi 15s → phù hợp metrics liên tục
+- **K6 + InfluxDB (PUSH model)**: K6 chủ động ghi vào InfluxDB mỗi giây → phù hợp metrics load test có thời điểm bắt đầu/kết thúc rõ ràng
+
+**Kết quả của Bước 5:**
+- Dashboard `K6 Load Test — ShopApi Performance` xuất hiện trong Grafana
+- Theo dõi realtime VUs, latency P50/P95/P99, error rate, throughput trong lúc test đang chạy
+
+---
+
+### 8.2 Triển khai InfluxDB
+
+**Bước 1: Khởi động stack với InfluxDB**
+
+```bash
+# Từ thư mục gốc project trên WSL
+cd ~/projects/Monitoring_Stack_Gold
+
+# Khởi động toàn bộ stack (bao gồm InfluxDB mới thêm)
+docker compose -f docker-compose.wsl.yml up -d
+
+# Kiểm tra InfluxDB đã lên chưa
+docker ps --format "table {{.Names}}\t{{.Status}}" | grep influx
+# Kỳ vọng: monitoring_influxdb   Up X minutes
+```
+
+**Bước 2: Kiểm tra InfluxDB và database k6 đã được tạo**
+
+```bash
+# Chạy lệnh InfluxDB trong container để kiểm tra database
+docker exec monitoring_influxdb influx -execute "SHOW DATABASES"
+# Kỳ vọng: thấy "k6" trong danh sách
+
+# Nếu chưa có, tạo thủ công:
+docker exec monitoring_influxdb influx -execute "CREATE DATABASE k6"
+```
+
+**Bước 3: Xác nhận Grafana đã nhận InfluxDB datasource**
+
+```bash
+# Mở Grafana: http://localhost:3000 (admin / admin123)
+# Vào: Configuration → Data Sources
+# Kiểm tra thấy "InfluxDB — K6" với status "Data source connected"
+
+# Hoặc kiểm tra qua API:
+curl -s http://admin:admin123@localhost:3000/api/datasources | python3 -m json.tool | grep -A2 "influxdb"
+```
+
+**[QUAN TRỌNG] `docker compose up -d` KHÔNG restart Grafana nếu config Grafana không đổi:**
+
+```
+Tình huống thực tế:
+- Grafana đang chạy từ trước
+- Bạn thêm file influxdb.yml vào src/monitoring/grafana/provisioning/datasources/
+- Chạy: docker compose up -d  ← chỉ start container MỚI (InfluxDB), không restart Grafana
+- Mở Grafana → không thấy InfluxDB datasource
+
+Lý do: Grafana đọc provisioning files lúc STARTUP, không watch file mới được thêm vào.
+       docker compose up -d chỉ start/restart container có config thay đổi — Grafana không đổi → không restart.
+```
+
+**Fix — Reload datasource provisioning (không cần restart):**
+
+```bash
+# [BẮT BUỘC] Chạy lệnh này mỗi khi thêm file mới vào datasources/
+curl -X POST http://admin:admin123@localhost:3000/api/admin/provisioning/datasources/reload
+# Kỳ vọng: {"message":"Datasources config reloaded"}
+
+# Kiểm tra datasource đã xuất hiện chưa:
+curl -s http://admin:admin123@localhost:3000/api/datasources | python3 -m json.tool | grep '"name"'
+# Kỳ vọng: "Prometheus" VÀ "InfluxDB — K6"
+```
+
+**Chẩn đoán nếu reload xong mà vẫn không thấy:**
+
+```bash
+# Xem Grafana có báo lỗi gì với file provisioning không
+docker logs monitoring_grafana 2>&1 | grep -iE "(influx|provision|datasource|error)" | tail -20
+
+# Xem file đã mount vào container chưa
+docker exec monitoring_grafana ls /etc/grafana/provisioning/datasources/
+# Kỳ vọng: influxdb.yml  prometheus.yml
+
+# Test kết nối InfluxDB từ Grafana container
+docker exec monitoring_grafana wget -qO- http://influxdb:8086/ping && echo "OK"
+# Kỳ vọng: OK (HTTP 204 + dòng "OK")
+```
+
+**Nếu datasource hiện nhưng status "connection refused":**
+
+```bash
+# Kiểm tra InfluxDB container có đang chạy không
+docker ps --format "table {{.Names}}\t{{.Status}}" | grep influx
+# Nếu không có → chạy: docker compose -f docker-compose.wsl.yml up -d influxdb
+
+# Kiểm tra InfluxDB health từ WSL host
+curl -s http://localhost:8086/ping -o /dev/null -w "%{http_code}"
+# Kỳ vọng: 204
+```
+
+---
+
+### 8.3 Cài đặt K6 trên WSL
+
+K6 chạy trực tiếp trên WSL (Ubuntu), KHÔNG chạy trong container — vì K6 cần kết nối ra ShopApi (localhost:5065) và ghi vào InfluxDB (localhost:8086).
+
+```bash
+# [BẮT BUỘC] Thêm repository chính thức của Grafana (K6 do Grafana phát triển)
+sudo gpg -k
+sudo gpg --no-default-keyring \
+         --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+         --keyserver hkp://keyserver.ubuntu.com:80 \
+         --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+
+echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] \
+https://dl.k6.io/deb stable main" \
+| sudo tee /etc/apt/sources.list.d/k6.list
+
+# [BẮT BUỘC] Cài K6
+sudo apt-get update
+sudo apt-get install k6 -y
+
+# Kiểm tra version
+k6 version
+# Kỳ vọng: k6 v0.50.0 (hay cao hơn), go1.21.x
+```
+
+**[TÙY CHỌN] Cài K6 qua binary trực tiếp (nếu apt gặp vấn đề):**
+
+```bash
+# Tải binary mới nhất từ GitHub releases
+K6_VERSION=v0.53.0
+curl -L https://github.com/grafana/k6/releases/download/${K6_VERSION}/k6-${K6_VERSION}-linux-amd64.tar.gz \
+     -o /tmp/k6.tar.gz
+tar -xzf /tmp/k6.tar.gz -C /tmp/
+sudo mv /tmp/k6-${K6_VERSION}-linux-amd64/k6 /usr/local/bin/k6
+k6 version
+```
+
+---
+
+### 8.4 Chạy Load Test và xem kết quả
+
+**Chuẩn bị trước khi test:**
+
+```bash
+# [BẮT BUỘC] Xác nhận ShopApi đang chạy
+curl -s http://localhost:5065/health
+# Kỳ vọng: {"status":"Healthy"} hoặc HTTP 200
+
+# [BẮT BUỘC] Xác nhận InfluxDB đang chạy
+curl -s http://localhost:8086/ping
+# Kỳ vọng: HTTP 204 (no body — đây là đặc điểm của InfluxDB v1 health check)
+```
+
+**Chạy Standard Load Test:**
+
+```bash
+cd ~/projects/Monitoring_Stack_Gold
+
+# [BẮT BUỘC] --out influxdb=... để ghi kết quả vào InfluxDB
+k6 run --out influxdb=http://localhost:8086/k6 src/k6/load-test.js
+
+# Chạy với server VMware (thay vì localhost):
+k6 run --out influxdb=http://localhost:8086/k6 \
+       -e BASE_URL=http://192.168.1.35:5065 \
+       src/k6/load-test.js
+```
+
+**Output của K6 khi đang chạy:**
+
+```
+          /\      |‾‾| /‾‾/   /‾‾/
+     /\  /  \     |  |/  /   /  /
+    /  \/    \    |     (   /   ‾‾\
+   /          \   |  |\  \ |  (‾)  |
+  / __________ \  |__| \__\ \_____/ .io
+
+  execution: local
+     script: src/k6/load-test.js
+     output: InfluxDBv1 (http://localhost:8086/k6)
+
+  scenarios: (100.00%) 1 scenario, 80 max VUs, 6m30s max duration
+           * default: Up to 80 looping VUs for 6m0s over 6 stages
+
+  ✓ login: status 200
+  ✓ login: có token trong response
+  ✓ products: status 200
+  ✗ order: status 200 hoặc 201                       ← nếu thấy ✗ = có vấn đề
+
+  http_req_duration............: avg=125.3ms min=12ms med=89ms max=2.1s
+                                  p(90)=310ms p(95)=450ms p(99)=1.2s
+
+  ✓ thresholds: http_req_duration - p(95)<500     ← PASS
+  ✗ thresholds: shopapi_order_duration - p(95)<800 ← FAIL: Order chậm
+```
+
+**Mở Grafana theo dõi realtime trong lúc test chạy:**
+
+```
+http://localhost:3000
+→ Dashboards → Monitoring → K6 Load Test — ShopApi Performance
+→ Đặt time range: Last 30 minutes
+→ Auto refresh: 5s (đã cấu hình sẵn trong dashboard)
+```
+
+**Chạy Stress Test (tìm breaking point):**
+
+```bash
+# [CẢNH BÁO] Chỉ chạy trên môi trường DEV
+k6 run --out influxdb=http://localhost:8086/k6 src/k6/stress-test.js
+
+# Tùy chọn: ghi thêm log ra file để phân tích sau
+k6 run --out influxdb=http://localhost:8086/k6 \
+       --log-output=file=./k6-stress-$(date +%Y%m%d-%H%M%S).log \
+       src/k6/stress-test.js
+```
+
+**Xem kết quả sau khi test kết thúc:**
+
+```bash
+# Kiểm tra data đã có trong InfluxDB
+docker exec monitoring_influxdb influx -database k6 \
+  -execute "SHOW MEASUREMENTS"
+# Kỳ vọng: http_req_duration, http_reqs, vus, shopapi_order_duration, ...
+
+# Query P95 tổng của lần test vừa rồi
+docker exec monitoring_influxdb influx -database k6 \
+  -execute "SELECT percentile(\"value\", 95) FROM \"http_req_duration\" WHERE time > now() - 1h"
+```
+
+---
+
+### 8.5 Các loại Load Test
+
+| Loại | Script | Mục đích | Khi nào dùng |
+|---|---|---|---|
+| **Load Test** | `load-test.js` | Kiểm tra hiệu năng dưới tải thực tế | Trước mỗi release lớn |
+| **Stress Test** | `stress-test.js` | Tìm breaking point | Khi muốn biết giới hạn server |
+| **Smoke Test** | Chạy load-test.js với `--vus 1 --duration 1m` | Kiểm tra nhanh API có hoạt động không | Sau mỗi deploy |
+| **Soak Test** | Chạy load-test.js với `duration: '24h', target: 20` | Phát hiện memory leak, resource leak | Khi nghi ngờ có leak |
+| **Spike Test** | Sửa stages: 0→200 VU trong 10s | Test khả năng absorb traffic đột biến | Flash sale, event |
+
+**Smoke Test nhanh (chạy sau mỗi deploy):**
+
+```bash
+# 1 VU, 1 phút, không ghi InfluxDB
+k6 run --vus 1 --duration 1m src/k6/load-test.js
+
+# Nếu tất cả ✓ → deploy OK
+# Nếu có ✗ → có vấn đề với endpoint mới
+```
+
+---
+
+## 9. Kiểm tra ngưỡng server — Điều gì xảy ra khi nhiều request đồng thời
+
+### 9.1 Các ngưỡng quan trọng
+
+Khi chạy stress test và tăng VUs, server đi qua các "phase" sau:
+
+```
+VUs tăng dần →
+
+Phase 1: NORMAL          Phase 2: DEGRADED         Phase 3: BREAKING
+─────────────────────    ──────────────────────    ──────────────────────
+Latency: ổn định         Latency: tăng dần         Latency: tăng vọt
+Error Rate: ~0%          Error Rate: 1-5%           Error Rate: >10%
+CPU: < 70%               CPU: 70-90%                CPU: >90% hoặc throttle
+RAM: ổn định             RAM: tăng dần              RAM: gần limit → OOM
+DB Pool: < 80% đầy       DB Pool: bão hòa bắt đầu  DB Pool: hết slot → timeout
+                                 ↑                          ↑
+                         [Phát hiện sớm ở đây]     [Đây là breaking point]
+```
+
+**Các ngưỡng theo từng loại resource:**
+
+#### CPU
+
+| Chỉ số | Ngưỡng | Ý nghĩa | Hành động |
+|---|---|---|---|
+| CPU Usage | < 70% | Bình thường | Không cần làm gì |
+| CPU Usage | 70-85% | Cần theo dõi | Xem có trend tăng không |
+| CPU Usage | > 85% liên tục | Nguy hiểm | Scale hoặc tối ưu |
+| CPU Throttle | < 10% | Bình thường | Không cần làm gì |
+| CPU Throttle | 10-25% | Cần tăng CPU limit | `--cpus` trong docker-compose |
+| CPU Throttle | > 25% | **Khẩn cấp** | Tăng limit NGAY, check code |
+
+**Khi CPU throttle cao nhưng CPU usage thấp — điều này có thể xảy ra:**
+```
+Docker: --cpu-limit=0.5 (50% của 1 core)
+Container đang dùng 45% → gần limit → bị throttle 30%
+Nhìn Monitoring Overview: CPU Usage = 45% (xanh lá) nhưng Throttle = 30% (vàng)
+→ Đừng nhầm: container không có vấn đề code, chỉ cần tăng CPU limit
+```
+
+#### Memory
+
+| Chỉ số | Ngưỡng | Ý nghĩa | Hành động |
+|---|---|---|---|
+| Memory Usage | < 70% limit | Bình thường | Không cần làm gì |
+| Memory Usage | 70-85% | Cần theo dõi | Check working_set vs usage |
+| Memory Working Set | > 85% limit | OOM Kill sắp xảy ra | Tăng limit hoặc tìm leak ngay |
+| Memory tăng liên tục | Bất kỳ | Leak pattern | Restart + điều tra |
+
+**Sự khác biệt giữa Memory Usage và Working Set:**
+```
+Memory Usage     = RSS + page cache + anonymous pages
+Memory Working Set = RSS + anonymous (không tính cache)
+
+Kubernetes & Docker OOM Killer nhìn vào WORKING SET, không phải USAGE.
+→ App có thể bị kill dù Usage còn thấp nếu Working Set vượt limit.
+→ Nếu trên Grafana thấy Usage < limit nhưng container bị restart → kiểm tra Working Set.
+```
+
+#### Database Connection Pool
+
+| Chỉ số | Ngưỡng | Ý nghĩa |
+|---|---|---|
+| Active connections | < 60% pool size | Bình thường |
+| Active connections | 60-80% | Cần theo dõi dưới tải |
+| Active connections | > 80% | Request sắp phải chờ |
+| Connections = Pool Max | = 100% | Request timeout → 503 |
+
+**Tại sao DB connection pool là bottleneck phổ biến nhất:**
+```
+ShopApi EF Core mặc định: MaxPoolSize = 100 connections
+
+Scenario: 80 VU, mỗi request đặt hàng cần 1 connection trong 50ms
+→ 80 VU × (request mỗi 3s) = 80/3 ≈ 27 requests/giây
+→ Mỗi request giữ connection 50ms → concurrent connections = 27 × 0.05 = 1.35 → OK
+
+Nhưng nếu có N+1 query:
+→ 1 request đặt hàng thực ra thực hiện 15 queries (N+1 products)
+→ Latency tăng từ 50ms → 500ms → concurrent connections = 27 × 0.5 = 13.5
+→ Vẫn OK với pool 100
+
+Nhưng khi spike 200 VU:
+→ 200/3 ≈ 67 req/s × 0.5s = 33.5 concurrent connections
+→ N+1 thêm: 33.5 × 15 = 502 concurrent queries → pool exhausted
+→ Tất cả request mới bị queue → latency tăng vọt → timeout cascade
+```
+
+---
+
+### 9.2 Patterns nguy hiểm
+
+#### Pattern 1: Latency Cliff (vách đá latency)
+
+```
+Biểu hiện trên K6 Dashboard:
+
+VUs:      ──────────────────╱────────
+                            ↑ tăng VUs
+P95:      ──────────────────╱╲──────  ← tăng đột ngột rồi về
+P99:      ───────────────────────╱╲─  ← lag hơn, tăng muộn hơn
+Error:    ─────────────────────────╱  ← lỗi xuất hiện muộn nhất
+```
+
+**Nguyên nhân:** Khi VUs vượt qua ngưỡng, connection pool hoặc thread pool bão hòa → mọi request phải queue → cascade failure.
+
+**Cách phát hiện:** Nhìn P99 - P50 gap. Khi P99 tăng gấp 3-5 lần P50, đó là dấu hiệu queue bottleneck.
+
+**Giải quyết:**
+```bash
+# 1. Tăng connection pool (EF Core)
+# Trong appsettings.json:
+"ConnectionStrings": {
+  "DefaultConnection": "...;Max Pool Size=200;Min Pool Size=5"
+}
+
+# 2. Xác nhận vấn đề là pool, không phải query:
+# Nếu sau khi tăng pool → P99 về bình thường → đúng là pool
+# Nếu không → vấn đề ở chỗ khác (N+1, slow query, external API)
+```
+
+---
+
+#### Pattern 2: Memory Staircase (bậc thang memory)
+
+```
+Biểu hiện trên Monitoring Overview:
+
+RAM:  200MB ─────╱─── 350MB ─────╱─── 500MB ─────╱───
+                ↑ GC chạy        ↑ GC chạy        ↑ GC không thu đủ
+                nhưng không về   nhưng không về
+```
+
+**Nguyên nhân:** Memory leak trong .NET — thường do:
+1. `static List/Dictionary` tích lũy dữ liệu không xóa
+2. Event handler không unsubscribe
+3. `DbContext` giữ entity trong memory quá lâu
+4. HttpClient được tạo mới mỗi request (socket exhaustion + memory)
+
+**Cách phát hiện qua K6:** Chạy soak test (1-2 tiếng) với VU thấp (10-20) và theo dõi RAM trend.
+
+**Giải quyết:**
+```bash
+# 1. Restart tạm thời để giải phóng (production emergency)
+docker restart monitoring_shopapi
+
+# 2. Lấy memory dump để phân tích
+docker exec monitoring_shopapi dotnet-dump collect -p 1 -o /tmp/dump.dmp
+docker cp monitoring_shopapi:/tmp/dump.dmp ./dump.dmp
+# Dùng dotnet-dump analyze để tìm object chiếm nhiều memory nhất
+
+# 3. Sau khi tìm được root cause, fix code và deploy lại
+```
+
+---
+
+#### Pattern 3: CPU Spike → Latency Spike (correlated)
+
+```
+Biểu hiện:
+
+CPU:      ──────╱╲────── (spike ngắn, về bình thường)
+P99:      ────────╱╲──── (lag sau CPU ~1-2s → về bình thường)
+```
+
+**Nguyên nhân:** GC Full Collection (Gen 2) — .NET dừng tất cả thread trong vài giây.
+
+**Cách phân biệt GC vs CPU overload thực sự:**
+- GC: spike ngắn (< 5s), đều đặn theo chu kỳ, P50 bình thường trong lúc P99 spike
+- Overload: CPU cao liên tục, cả P50 lẫn P99 đều tăng
+
+**Giải quyết:**
+```
+Nếu là GC:
+1. Xem GC metrics: dotnet_gc_collections_total{generation="2"} trên Prometheus
+   (cần ShopApi expose prometheus-net metrics — Bước 7)
+2. Tuning: giảm object allocation, dùng ArrayPool, Span<T>
+3. Tăng RAM limit để GC chạy ít hơn
+
+Nếu là CPU overload thực sự:
+1. Xem endpoint nào đang chiếm nhiều CPU (cần APM hoặc Application Insights)
+2. Tìm: regex phức tạp, JSON serialization lớn, sync-over-async
+3. Scale horizontal: thêm instance hoặc tăng CPU limit
+```
+
+---
+
+#### Pattern 4: Error Storm (bão lỗi)
+
+```
+Biểu hiện:
+
+Error Rate:  ─────────────────────╱╲────  (tăng đột ngột)
+Latency:     ─────────────────────╱╲────  (đi kèm)
+Container:   5 ──────────────────── 4      (1 container crash)
+```
+
+**Nguyên nhân phổ biến:**
+1. OOM Kill — container bị Linux kernel kill vì vượt memory limit
+2. Unhandled exception làm crash process
+3. Database connection bị close (SQL Server restart hoặc network blip)
+4. External dependency timeout cascade
+
+**Checklist khi xảy ra:**
+```bash
+# 1. Xem container có restart không
+docker ps -a --format "{{.Names}}\t{{.Status}}\t{{.RestartCount}}"
+# Nếu RestartCount > 0 trong thời gian ngắn → đang crash loop
+
+# 2. Xem log trước lúc crash
+docker logs monitoring_shopapi --since 10m 2>&1 | grep -E "(error|Error|FATAL|OOM|killed)"
+
+# 3. Xem OS có OOM Kill không
+dmesg | grep -i "oom\|killed" | tail -20
+
+# 4. Xem exit code của container (137 = OOM Kill, 1 = error, 0 = clean exit)
+docker inspect monitoring_shopapi --format='{{.State.ExitCode}}'
+# ExitCode 137 → OOM Kill → tăng memory limit
+# ExitCode 1 → exception trong code → xem log
+```
+
+---
+
+### 9.3 Correlation Matrix
+
+Đây là bảng đọc nhiều panel cùng lúc để xác định root cause chính xác:
+
+| Khi thấy | P99 tăng | Error Rate tăng | CPU cao | RAM tăng | Containers giảm | Root cause có thể là |
+|---|---|---|---|---|---|---|
+| ✅ | | | | | | Query chậm, N+1, external API timeout |
+| ✅ | ✅ | | | | | DB pool exhausted, connection timeout |
+| ✅ | ✅ | ✅ | | | | CPU overload, thread starvation |
+| ✅ | | | ✅ | | | Memory leak → GC pressure |
+| | ✅ | | | ✅ | OOM Kill → container restart → circuit break |
+| ✅ | ✅ | | ✅ | | N+1 + memory leak combo |
+| ✅ | ✅ | ✅ | ✅ | ✅ | Hệ thống đang sụp đổ — escalate ngay |
+
+**Ví dụ đọc thực tế:**
+
+```
+Scenario: Sau khi tăng lên 80 VU:
+- Monitoring Overview: CPU Usage = 40% (bình thường), CPU Throttle = 35% (ĐỎ)
+- K6 Dashboard: P99 = 1.2s (ĐỎ), Error Rate = 0.5% (XANH)
+- Container Table: RAM shopapi = 450MB (bình thường)
+
+Đọc: CPU bình thường nhưng THROTTLE cao → container đang bị giới hạn CPU limit
+→ Hành động: Tăng CPU limit cho shopapi trong docker-compose.wsl.yml
+→ KHÔNG cần scale, KHÔNG cần tối ưu code
+```
+
+```yaml
+# Trong docker-compose.wsl.yml, thêm vào service shopapi:
+  shopapi:
+    # ... các config hiện tại ...
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'     # Tăng từ default lên 2 cores
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+```
+
+---
+
+### 9.4 Scaling Decision Tree
+
+Khi nào scale gì — quy trình ra quyết định:
+
+```
+P99 vượt SLO?
+│
+├─► Không → Không cần làm gì
+│
+└─► Có
+    │
+    ├─► CPU Throttle > 25%?
+    │   └─► Tăng CPU limit trước → test lại
+    │       └─► Vẫn chậm? → Scale horizontal
+    │
+    ├─► CPU Throttle thấp + CPU Usage cao (>80%)?
+    │   └─► Profile code → tìm hot path
+    │       ├─► N+1 query → thêm Include() / eager loading
+    │       ├─► Sync CPU work → async hoặc background job
+    │       └─► Không tối ưu được → Scale horizontal
+    │
+    ├─► Memory tăng dần (leak)?
+    │   └─► Restart tạm thời → điều tra code → fix → deploy
+    │
+    ├─► DB Connection Pool bão hòa?
+    │   ├─► Tăng MaxPoolSize trong connection string
+    │   ├─► Tìm N+1 queries (xem EF Core logging)
+    │   └─► Tăng số lượng DB read replicas nếu read-heavy
+    │
+    └─► Latency cao nhưng CPU/RAM/DB bình thường?
+        └─► Kiểm tra external dependency:
+            ├─► curl -w "\nConnect: %{time_connect}s\nTotal: %{time_total}s" http://external-api
+            └─► Nếu external chậm → thêm timeout + circuit breaker
+```
+
+**Ưu tiên thứ tự tối ưu (từ rẻ nhất đến tốn kém nhất):**
+
+```
+1. Tăng resource limit (--cpus, --memory) — free, chỉ restart 1 container
+2. Tối ưu query/code — vài giờ dev, zero infra cost
+3. Thêm cache (Redis) — moderate cost, giảm tải DB đáng kể
+4. Scale vertical (VM to lớn hơn) — tốn tiền, không phải lúc nào cũng giải quyết được
+5. Scale horizontal (thêm instance + load balancer) — phức tạp hơn, cần stateless app
+6. Sharding database / read replica — phức tạp nhất, cho hệ thống lớn
+```
+
+---
+
+*Tạo: 2026-06-10 | Cập nhật: 2026-06-10 — Thêm Bước 5 (InfluxDB + K6 Load Test) + hướng dẫn kiểm tra ngưỡng server chi tiết.*
