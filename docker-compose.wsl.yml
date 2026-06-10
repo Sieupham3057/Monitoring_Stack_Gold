@@ -66,7 +66,7 @@ services:
       # .NET 8 bên trong container lắng nghe port 8080
       - "5065:8080"
     environment:
-      ASPNETCORE_ENVIRONMENT: "Production"
+      ASPNETCORE_ENVIRONMENT: "Development"
       # [BẮT BUỘC] Chỉ định rõ URL để .NET 8 lắng nghe đúng port
       ASPNETCORE_URLS: "http://+:8080"
       # Override connection string — dùng tên service "sqlserver" làm hostname
@@ -98,7 +98,7 @@ services:
       - "9090:9090"
     volumes:
       # [BẮT BUỘC] Mount file config — :ro = read-only để tránh container ghi đè
-      - ./src/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./src/monitoring/prometheus/prometheus.wsl.yml:/etc/prometheus/prometheus.yml:ro
       # [KHUYẾN NGHỊ] Persist data — restart không mất metrics history
       - prometheus_data:/prometheus
     command:
@@ -151,6 +151,32 @@ services:
       - monitoring_net
 
   # ----------------------------------------------------------
+  # BANKING-API — ASP.NET Core Web API
+  # [TÙY CHỌN] Bỏ comment khi đã có source code thực tế tại ./src/BankingApi
+  # Điều kiện:
+  #   1. Thư mục ./src/BankingApi phải tồn tại và có Dockerfile
+  #   2. BankingApi đã cài prometheus-net và gọi app.UseHttpMetrics()
+  #   3. Sau khi bỏ comment: docker compose -f docker-compose.wsl.yml up -d banking-api
+  # ----------------------------------------------------------
+  # banking-api:
+  #   build:
+  #     context: ./src/BankingApi
+  #     dockerfile: Dockerfile
+  #   container_name: monitoring_banking_api
+  #   ports:
+  #     - "5066:8080"
+  #   environment:
+  #     ASPNETCORE_ENVIRONMENT: "Development"
+  #     ASPNETCORE_URLS: "http://+:8080"
+  #     ConnectionStrings__DefaultConnection: "Server=sqlserver,1433;Database=BankingDb;User Id=sa;Password=YourStrong@Passw0rd;TrustServerCertificate=True;"
+  #   depends_on:
+  #     sqlserver:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+  #   networks:
+  #     - monitoring_net
+
+  # ----------------------------------------------------------
   # cADVISOR — Container Advisor, thu thập metrics của Docker
   # [BẮT BUỘC] Bước 2: nguồn metrics container cho Prometheus
   # Tự động phát hiện tất cả container đang chạy trên host
@@ -159,20 +185,27 @@ services:
     image: gcr.io/cadvisor/cadvisor:v0.49.1
     container_name: monitoring_cadvisor
     ports:
-      # UI: http://192.168.1.35:8080
+      # UI: http://192.168.1.35:8080 / localhost:8080 (WSL2)
       - "8080:8080"
     command:
-      # [BẮT BUỘC] Ubuntu 22.04+ Docker dùng containerd snapshotter thay vì overlay2 truyền thống.
-      # cAdvisor Docker factory đọc sai đường dẫn layerdb → dùng containerd factory trực tiếp.
-      # /var/run/containerd/containerd.sock vì /var/run mount từ host (symlink → /run)
+      # [BẮT BUỘC - WSL2 với containerd-snapshotter]
+      # WSL2 Docker Engine bật "containerd-snapshotter" theo mặc định → Docker lưu layer
+      # theo format containerd (overlayfs), KHÔNG có thư mục layerdb/mounts/ truyền thống.
+      # → cAdvisor Docker factory tìm file mount-id → "no such file" → container không tạo được.
+      #
+      # Giải pháp: dùng containerd factory (gRPC API) thay vì Docker factory (đọc file layerdb).
+      # containerd factory lấy info container qua containerd socket → không cần layerdb.
+      # namespace "moby" = nơi Docker lưu container trong containerd (không phải k8s.io).
       - '--containerd=/var/run/containerd/containerd.sock'
-      # [BẮT BUỘC] Docker containers chạy trong namespace "moby" của containerd (không phải default "k8s.io")
       - '--containerd-namespace=moby'
     volumes:
       # [BẮT BUỘC] cAdvisor cần đọc thông tin từ host OS để lấy metrics
       - /:/rootfs:ro                        # filesystem gốc của host
-      - /var/run/docker.sock:/var/run/docker.sock  # Docker socket (không :ro — Unix socket cần write để connect)
-      - /var/run:/var/run:ro                # chứa containerd.sock tại /var/run/containerd/containerd.sock
+      # [QUAN TRỌNG - WSL2] Chỉ mount containerd.sock trực tiếp (writable) để gRPC kết nối được.
+      # KHÔNG mount /var/run hay docker.sock — nếu docker.sock tồn tại trong container (dù là :ro),
+      # Docker factory vẫn có thể kết nối Unix socket và sẽ register, sau đó fail vì không có layerdb.
+      # → Không có docker.sock → Docker factory không register → containerd factory xử lý tất cả.
+      - /var/run/containerd/containerd.sock:/var/run/containerd/containerd.sock
       - /sys:/sys:ro                        # thông tin kernel, cgroups
       - /sys/fs/cgroup:/sys/fs/cgroup:ro   # [BẮT BUỘC nếu cgroup v2] cgroup v2 hierarchy
       - /var/lib/docker/:/var/lib/docker:ro # metadata các container

@@ -1,0 +1,119 @@
+# ============================================================
+# PROMETHEUS CONFIGURATION — prometheus.yml
+# File này định nghĩa:
+#   1. Cài đặt toàn cục (global)
+#   2. Danh sách các target mà Prometheus sẽ scrape metrics
+#
+# Prometheus hoạt động theo mô hình PULL:
+#   Prometheus chủ động gọi HTTP GET đến /metrics của từng target
+#   (ngược với mô hình PUSH như InfluxDB)
+# ============================================================
+
+global:
+  # [BẮT BUỘC] Tần suất scrape metrics từ tất cả target
+  # 15s = cân bằng giữa độ chi tiết và tải hệ thống
+  # Production có thể tăng lên 30s nếu có nhiều target
+  scrape_interval: 15s
+
+  # [BẮT BUỘC] Tần suất Prometheus evaluate (tính toán) alert rules
+  # Thường đặt bằng scrape_interval
+  evaluation_interval: 15s
+
+  # [TÙY CHỌN] Labels mặc định gắn vào mọi time-series của server này
+  # Hữu ích khi có nhiều Prometheus server gửi data về Grafana
+  # external_labels:
+  #   environment: 'production'
+  #   region: 'vn-hanoi'
+
+# ============================================================
+# ALERT RULES — file chứa điều kiện trigger alert
+# [TÙY CHỌN] Bước 4 sẽ cấu hình AlertManager + rules
+# ============================================================
+# rule_files:
+#   - "alert_rules.yml"
+
+# ============================================================
+# ALERTMANAGER — nơi Prometheus gửi alert đến
+# [TÙY CHỌN] Cấu hình ở Bước 4
+# ============================================================
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ['alertmanager:9093']
+
+# ============================================================
+# SCRAPE CONFIGS — danh sách target cần thu thập metrics
+# Mỗi job_name = một nhóm target cùng loại
+# ============================================================
+scrape_configs:
+
+  # ----------------------------------------------------------
+  # JOB 1: Prometheus tự monitor chính mình
+  # [BẮT BUỘC] Luôn cần để theo dõi sức khỏe của Prometheus
+  # Metrics: số query đang xử lý, memory dùng, v.v.
+  # URL scrape: http://localhost:9090/metrics
+  # ----------------------------------------------------------
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # ----------------------------------------------------------
+  # JOB 2: cAdvisor — metrics của Docker containers
+  # [BẮT BUỘC] Đây là mục tiêu chính của Bước 2
+  # Metrics: CPU, RAM, Network, Disk của từng container
+  # URL scrape: http://cadvisor:8080/metrics
+  # "cadvisor" được resolve bởi Docker DNS (tên service trong docker-compose)
+  # ----------------------------------------------------------
+  - job_name: 'cadvisor'
+    scrape_interval: 15s   # override global nếu muốn tần suất riêng
+    static_configs:
+      - targets: ['cadvisor:8080']
+        labels:
+          # [TÙY CHỌN] Đặt tên môi trường để filter trên Grafana khi có nhiều server.
+          # Thay giá trị này thành hostname/IP thực của server bạn đang deploy.
+          # Ví dụ: host: '192.168.1.35'  hoặc  host: 'ubuntu-prod-01'
+          host: 'monitoring-server'
+
+  # ----------------------------------------------------------
+  # JOB 3: ShopApi — expose /metrics qua prometheus-net
+  # [BẮT BUỘC] Scrape metrics nghiệp vụ từ ShopApi
+  # Metrics có sẵn: http_requests_received_total, http_request_duration_seconds,
+  #                 shopapi_orders_total, shopapi_order_processing_duration_seconds,
+  #                 shopapi_auth_logins_total, shopapi_product_queries_total
+  # ----------------------------------------------------------
+  - job_name: 'shopapi'
+    static_configs:
+      - targets: ['shopapi:8080']
+        labels:
+          app: 'shopapi'
+          env: 'production'
+
+  # ----------------------------------------------------------
+  # JOB 4: BankingApi — container từ project Docker Compose khác
+  # Điều kiện để chạy được:
+  #   banking-api phải join vào monitoring_net:
+  #   docker network connect monitoring_stack_gold_monitoring_net banking-api
+  #
+  # Target dùng tên container (banking-api) + port NỘI BỘ (8080),
+  # KHÔNG dùng port host (8089) vì Prometheus giao tiếp trong Docker network.
+  # ----------------------------------------------------------
+  - job_name: 'banking-api'
+    static_configs:
+      - targets: ['banking-api:8080']
+        labels:
+          app: 'banking-api'
+          env: 'production'
+
+  # ----------------------------------------------------------
+  # THÊM API MỚI: Copy block trên, đổi job_name và target
+  # Quy ước đặt tên job_name = tên service trong docker-compose
+  # để $service variable trong Grafana tự động nhận diện
+  # ----------------------------------------------------------
+
+  # ----------------------------------------------------------
+  # JOB Node Exporter — metrics OS của host (Linux)
+  # [TÙY CHỌN] Thêm ở bước sau nếu cần theo dõi host OS
+  # ----------------------------------------------------------
+  # - job_name: 'node-exporter'
+  #   static_configs:
+  #     - targets: ['node-exporter:9100']
