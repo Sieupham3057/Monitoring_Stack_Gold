@@ -1,13 +1,14 @@
 using Microsoft.AspNetCore.Diagnostics;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using ShopApi.Exceptions;
+using ShopApi.Infrastructure.Errors;
 
 namespace ShopApi.Infrastructure;
 
 public sealed class GlobalExceptionHandler(
     ILogger<GlobalExceptionHandler> logger,
     IProblemDetailsService problemDetailsService,
+    IApiProblemDetailsFactory apiProblemDetailsFactory,
     IHostEnvironment environment) : IExceptionHandler
 {
     public async ValueTask<bool> TryHandleAsync(
@@ -37,17 +38,12 @@ public sealed class GlobalExceptionHandler(
 
         httpContext.Response.StatusCode = statusCode;
 
-        var problem = new ProblemDetails
-        {
-            Status = statusCode,
-            Title = title,
-            Detail = detail,
-            Type = $"https://httpstatuses.com/{statusCode}",
-            Instance = httpContext.Request.Path
-        };
-        problem.Extensions["errorCode"] = errorCode;
-        problem.Extensions["traceId"] = httpContext.TraceIdentifier;
-        problem.Extensions["timestamp"] = DateTimeOffset.UtcNow;
+        var problem = apiProblemDetailsFactory.Create(
+            httpContext,
+            statusCode,
+            errorCode,
+            title,
+            detail);
 
         return await problemDetailsService.TryWriteAsync(new ProblemDetailsContext
         {

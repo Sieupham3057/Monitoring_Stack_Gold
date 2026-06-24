@@ -1,4 +1,4 @@
-@ShopApi_HostAddress = http://localhost:5065
+@ShopApi_HostAddress = http://localhost:5066
 @token = paste-jwt-token-here
 
 ### [BẮT BUỘC] Đăng ký tài khoản

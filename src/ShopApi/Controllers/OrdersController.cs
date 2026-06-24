@@ -6,10 +6,14 @@ using ShopApi.Data;
 using ShopApi.DTOs;
 using ShopApi.Entities;
 using ShopApi.Exceptions;
+using ShopApi.Infrastructure.Errors;
 
 namespace ShopApi.Controllers;
 
-public class OrdersController(AppDbContext db) : AuthorizedApiControllerBase
+public class OrdersController(
+    AppDbContext db,
+    IApiProblemDetailsFactory problemDetailsFactory)
+    : AuthorizedApiControllerBase(problemDetailsFactory)
 {
     private int CurrentUserId =>
         int.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId)

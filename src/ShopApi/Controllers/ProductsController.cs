@@ -5,10 +5,14 @@ using ShopApi.Data;
 using ShopApi.DTOs;
 using ShopApi.Entities;
 using ShopApi.Exceptions;
+using ShopApi.Infrastructure.Errors;
 
 namespace ShopApi.Controllers;
 
-public class ProductsController(AppDbContext db) : AuthorizedApiControllerBase
+public class ProductsController(
+    AppDbContext db,
+    IApiProblemDetailsFactory problemDetailsFactory)
+    : AuthorizedApiControllerBase(problemDetailsFactory)
 {
     /// <summary>
     /// Lấy danh sách sản phẩm có phân trang, tìm kiếm, lọc và sắp xếp.

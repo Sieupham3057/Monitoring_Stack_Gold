@@ -4,11 +4,16 @@ using ShopApi.Data;
 using ShopApi.DTOs;
 using ShopApi.Entities;
 using ShopApi.Exceptions;
+using ShopApi.Infrastructure.Errors;
 using ShopApi.Services;
 
 namespace ShopApi.Controllers;
 
-public class AuthController(AppDbContext db, JwtService jwtService) : ApiControllerBase
+public class AuthController(
+    AppDbContext db,
+    JwtService jwtService,
+    IApiProblemDetailsFactory problemDetailsFactory)
+    : ApiControllerBase(problemDetailsFactory)
 {
     [HttpPost("register")]
     public async Task<ActionResult<AuthResponse>> Register(

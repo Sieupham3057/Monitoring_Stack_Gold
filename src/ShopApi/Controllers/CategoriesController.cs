@@ -5,10 +5,14 @@ using ShopApi.Data;
 using ShopApi.DTOs;
 using ShopApi.Entities;
 using ShopApi.Exceptions;
+using ShopApi.Infrastructure.Errors;
 
 namespace ShopApi.Controllers;
 
-public class CategoriesController(AppDbContext db) : AuthorizedApiControllerBase
+public class CategoriesController(
+    AppDbContext db,
+    IApiProblemDetailsFactory problemDetailsFactory)
+    : AuthorizedApiControllerBase(problemDetailsFactory)
 {
     [HttpGet]
     [ProducesResponseType(typeof(PagedResult<CategoryResponse>), StatusCodes.Status200OK)]
