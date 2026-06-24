@@ -1,104 +1,138 @@
 # ============================================================
-# MONITORING STACK — Bước 1: ShopApi + SQL Server
-# Deploy lên server VMware: 192.168.1.35
+# MONITORING STACK — SQL Server + ShopApi + Frontend
 #
-# Chạy:  docker compose up -d --build
-# Dừng:  docker compose down
-# Log:   docker compose logs -f shopapi
+# Chạy:
+#   docker compose up -d --build
+#
+# Dừng:
+#   docker compose down
+#
+# Log:
+#   docker compose logs -f shopapi
+#   docker compose logs -f frontend
+#   docker compose logs -f sqlserver
 # ============================================================
 
 services:
 
   # ----------------------------------------------------------
   # SQL SERVER 2022
-  # [BẮT BUỘC] ShopApi cần SQL Server để chạy
   # ----------------------------------------------------------
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
     container_name: monitoring_sqlserver
     environment:
-      # [BẮT BUỘC] Password phải match với ConnectionString bên dưới
       SA_PASSWORD: "YourStrong@Passw0rd"
-      # [BẮT BUỘC] Microsoft yêu cầu chấp nhận EULA mới chạy được
       ACCEPT_EULA: "Y"
-      # [TÙY CHỌN] Developer = miễn phí, đủ tính năng Enterprise cho dev/test
       MSSQL_PID: "Developer"
     ports:
-      # host_port:container_port
-      # Giữ 1433 để SQL Server Management Studio kết nối trực tiếp từ máy host
       - "1433:1433"
     volumes:
-      # [KHUYẾN NGHỊ] Persist data — xóa container không mất database
       - sqlserver_data:/var/opt/mssql
     healthcheck:
-      # Ping SQL Server nội bộ để xác nhận đã sẵn sàng nhận kết nối
-      # -No: bỏ qua TLS warning (SQL Server 2022 mặc định enforce TLS)
       test:
-        - "CMD"
-        - "/opt/mssql-tools18/bin/sqlcmd"
-        - "-S"
-        - "localhost"
-        - "-U"
-        - "sa"
-        - "-P"
-        - "YourStrong@Passw0rd"
-        - "-Q"
-        - "SELECT 1"
-        - "-No"
-      interval: 15s       # kiểm tra mỗi 15 giây
-      timeout: 10s        # timeout mỗi lần kiểm tra
-      retries: 5          # thử lại tối đa 5 lần trước khi báo unhealthy
-      start_period: 30s   # SQL Server cần ~20-30s để khởi động lần đầu
+        [
+          "CMD",
+          "/opt/mssql-tools18/bin/sqlcmd",
+          "-S",
+          "localhost",
+          "-U",
+          "sa",
+          "-P",
+          "YourStrong@Passw0rd",
+          "-Q",
+          "SELECT 1",
+          "-No"
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
     networks:
       - monitoring_net
 
   # ----------------------------------------------------------
-  # SHOPAPI — ASP.NET Core 8 Web API
+  # BACKEND — ASP.NET Core 8 Web API
   # ----------------------------------------------------------
   shopapi:
     build:
-      context: ./src/ShopApi   # thư mục chứa Dockerfile và source code
+      context: ./src/ShopApi
       dockerfile: Dockerfile
     container_name: monitoring_shopapi
     ports:
-      # Truy cập từ bên ngoài qua: http://192.168.1.35:5065
-      # .NET 8 bên trong container lắng nghe port 8080
       - "5065:8080"
     environment:
       ASPNETCORE_ENVIRONMENT: "Production"
-      # [BẮT BUỘC] Chỉ định rõ URL để .NET 8 lắng nghe đúng port
       ASPNETCORE_URLS: "http://+:8080"
-      # Override connection string — dùng tên service "sqlserver" làm hostname
-      # (Docker network tự resolve "sqlserver" → IP của container sqlserver)
+
       ConnectionStrings__DefaultConnection: "Server=sqlserver,1433;Database=Mornitordb;User Id=sa;Password=YourStrong@Passw0rd;TrustServerCertificate=True;"
-      # JWT — [KHUYẾN NGHỊ] đổi key trước khi lên production thật
+
       Jwt__Key: "ShopApi_SuperSecretKey_2026_MustBe256BitsLongForHmacSha256!"
       Jwt__Issuer: "ShopApi"
       Jwt__Audience: "ShopApiClient"
       Jwt__ExpireMinutes: "120"
     depends_on:
       sqlserver:
-        # [BẮT BUỘC] Chờ SQL Server healthy trước khi start ShopApi
-        # Tránh lỗi "Cannot open database" khi SQL Server chưa sẵn sàng
         condition: service_healthy
     restart: unless-stopped
     networks:
       - monitoring_net
 
+  # ----------------------------------------------------------
+  # FRONTEND — React / Vite build + Nginx
+  # ----------------------------------------------------------
+  frontend:
+    build:
+      context: ./STRUCTURE_BASE
+      dockerfile: Dockerfile
+      args:
+        VITE_APP_NAME: ${VITE_APP_NAME:-Shop Admin}
+
+        # Để rỗng nếu frontend gọi API thông qua Nginx proxy nội bộ
+        VITE_API_URL: ""
+
+        VITE_REQUEST_TIMEOUT_MS: ${VITE_REQUEST_TIMEOUT_MS:-30000}
+
+    image: shop-admin-frontend:latest
+    container_name: shop-admin-frontend
+    restart: unless-stopped
+
+    ports:
+      # Truy cập frontend:
+      # http://localhost:8080
+      # hoặc http://192.168.1.35:8080
+      - "${FRONTEND_PORT:-8080}:80"
+
+    environment:
+      # Frontend container gọi backend qua Docker network
+      # Không dùng host.docker.internal nữa vì backend nằm cùng compose
+      API_UPSTREAM: "http://shopapi:8080"
+
+    depends_on:
+      - shopapi
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+    networks:
+      - monitoring_net
+
 # ============================================================
-# VOLUMES — lưu trữ persistent data ngoài container lifecycle
-# Xóa container vẫn giữ nguyên data
+# VOLUMES
 # ============================================================
 volumes:
   sqlserver_data:
     driver: local
 
 # ============================================================
-# NETWORKS — mạng nội bộ riêng cho monitoring stack
-# Các service giao tiếp với nhau qua tên service (DNS nội bộ)
-# Bên ngoài chỉ access được qua ports đã expose
+# NETWORKS
 # ============================================================
 networks:
   monitoring_net:
+    name: monitoring_net
     driver: bridge
