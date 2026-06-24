@@ -1,0 +1,17 @@
+node_modules
+dist
+coverage
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+.idea
+.vscode
+*.log
+Dockerfile*
+docker-compose*.yml
+README.md
+Structure_Code.md
+redux-toolkit-rtk-query-reactjs-full.md
+swagger.json
