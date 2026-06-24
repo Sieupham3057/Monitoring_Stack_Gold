@@ -3,44 +3,63 @@ using Microsoft.EntityFrameworkCore;
 using ShopApi.Data;
 using ShopApi.DTOs;
 using ShopApi.Entities;
+using ShopApi.Exceptions;
 using ShopApi.Services;
 
 namespace ShopApi.Controllers;
 
-[ApiController]
-[Route("api/[controller]")]
-public class AuthController(AppDbContext db, JwtService jwtService) : ControllerBase
+public class AuthController(AppDbContext db, JwtService jwtService) : ApiControllerBase
 {
-    // POST /api/auth/register
     [HttpPost("register")]
-    public async Task<IActionResult> Register(RegisterRequest req)
+    public async Task<ActionResult<AuthResponse>> Register(
+        [FromBody] RegisterRequest request,
+        CancellationToken cancellationToken)
     {
-        if (await db.Users.AnyAsync(u => u.Username == req.Username))
-            return Conflict(new { message = "Username đã tồn tại" });
+        var username = request.Username.Trim();
+        var email = request.Email.Trim().ToLowerInvariant();
+
+        if (await db.Users.AnyAsync(u => u.Username == username, cancellationToken))
+        {
+            throw new ConflictException(
+                "USERNAME_EXISTS",
+                $"Username '{username}' đã tồn tại.");
+        }
+
+        if (await db.Users.AnyAsync(u => u.Email == email, cancellationToken))
+        {
+            throw new ConflictException(
+                "EMAIL_EXISTS",
+                $"Email '{email}' đã được sử dụng.");
+        }
 
         var user = new User
         {
-            Username = req.Username,
-            Email = req.Email,
-            PasswordHash = BCrypt.Net.BCrypt.HashPassword(req.Password)
+            Username = username,
+            Email = email,
+            PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password)
         };
 
         db.Users.Add(user);
-        await db.SaveChangesAsync();
+        await db.SaveChangesAsync(cancellationToken);
 
         var (token, expiresAt) = jwtService.GenerateToken(user);
         return Ok(new AuthResponse(token, user.Username, expiresAt));
     }
 
-    // POST /api/auth/login
-    // Đây là endpoint K6 sẽ gọi đầu tiên để lấy JWT cho mỗi Virtual User
     [HttpPost("login")]
-    public async Task<IActionResult> Login(LoginRequest req)
+    public async Task<ActionResult<AuthResponse>> Login(
+        [FromBody] LoginRequest request,
+        CancellationToken cancellationToken)
     {
-        var user = await db.Users.FirstOrDefaultAsync(u => u.Username == req.Username);
+        var username = request.Username.Trim();
+        var user = await db.Users
+            .AsNoTracking()
+            .FirstOrDefaultAsync(u => u.Username == username, cancellationToken);
 
-        if (user is null || !BCrypt.Net.BCrypt.Verify(req.Password, user.PasswordHash))
-            return Unauthorized(new { message = "Sai tên đăng nhập hoặc mật khẩu" });
+        if (user is null || !BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
+        {
+            throw new UnauthorizedException("Username hoặc mật khẩu không chính xác.");
+        }
 
         var (token, expiresAt) = jwtService.GenerateToken(user);
         return Ok(new AuthResponse(token, user.Username, expiresAt));

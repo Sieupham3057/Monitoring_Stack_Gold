@@ -13,47 +13,58 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        // --- User ---
-        modelBuilder.Entity<User>(e =>
+        modelBuilder.Entity<User>(entity =>
         {
-            e.HasIndex(u => u.Username).IsUnique();
-            e.HasIndex(u => u.Email).IsUnique();
-            e.Property(u => u.Username).HasMaxLength(50).IsRequired();
-            e.Property(u => u.Email).HasMaxLength(100).IsRequired();
-            e.Property(u => u.PasswordHash).IsRequired();
+            entity.HasIndex(user => user.Username).IsUnique();
+            entity.HasIndex(user => user.Email).IsUnique();
+            entity.Property(user => user.Username).HasMaxLength(50).IsRequired();
+            entity.Property(user => user.Email).HasMaxLength(100).IsRequired();
+            entity.Property(user => user.PasswordHash).IsRequired();
         });
 
-        // --- Category ---
-        modelBuilder.Entity<Category>(e =>
+        modelBuilder.Entity<Category>(entity =>
         {
-            e.Property(c => c.Name).HasMaxLength(100).IsRequired();
+            entity.Property(category => category.Name).HasMaxLength(100).IsRequired();
+            entity.Property(category => category.Description).HasMaxLength(1000);
+            entity.HasIndex(category => category.Name).IsUnique();
         });
 
-        // --- Product ---
-        modelBuilder.Entity<Product>(e =>
+        modelBuilder.Entity<Product>(entity =>
         {
-            e.Property(p => p.Price).HasColumnType("decimal(18,2)");
-            e.Property(p => p.Name).HasMaxLength(200).IsRequired();
-            // Index để query theo category nhanh hơn — quan trọng khi có hàng triệu request
-            e.HasIndex(p => p.CategoryId);
+            entity.Property(product => product.Name).HasMaxLength(200).IsRequired();
+            entity.Property(product => product.Description).HasMaxLength(2000);
+            entity.Property(product => product.Price).HasColumnType("decimal(18,2)");
+            entity.Property(product => product.RowVersion).IsRowVersion();
+
+            entity.HasIndex(product => product.CategoryId);
+            entity.HasIndex(product => product.Name);
+            entity.HasIndex(product => product.Price);
+
+            // [BẮT BUỘC] Không cho xóa Category kéo theo Product và lịch sử đơn hàng.
+            entity.HasOne(product => product.Category)
+                .WithMany(category => category.Products)
+                .HasForeignKey(product => product.CategoryId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
-        // --- Order ---
-        modelBuilder.Entity<Order>(e =>
+        modelBuilder.Entity<Order>(entity =>
         {
-            e.Property(o => o.TotalAmount).HasColumnType("decimal(18,2)");
-            // Index để lấy orders của 1 user nhanh hơn
-            e.HasIndex(o => o.UserId);
-            e.HasIndex(o => o.CreatedAt);
+            entity.Property(order => order.TotalAmount).HasColumnType("decimal(18,2)");
+            entity.HasIndex(order => order.UserId);
+            entity.HasIndex(order => order.CreatedAt);
         });
 
-        // --- OrderItem ---
-        modelBuilder.Entity<OrderItem>(e =>
+        modelBuilder.Entity<OrderItem>(entity =>
         {
-            e.Property(oi => oi.UnitPrice).HasColumnType("decimal(18,2)");
+            entity.Property(item => item.UnitPrice).HasColumnType("decimal(18,2)");
+
+            // [BẮT BUỘC] Product đã bán không được cascade-delete khỏi lịch sử đơn hàng.
+            entity.HasOne(item => item.Product)
+                .WithMany(product => product.OrderItems)
+                .HasForeignKey(item => item.ProductId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
-        // Seed data để K6 test ngay mà không cần tạo dữ liệu trước
         modelBuilder.Entity<Category>().HasData(
             new Category { Id = 1, Name = "Electronics", Description = "Thiết bị điện tử" },
             new Category { Id = 2, Name = "Clothing", Description = "Thời trang" },

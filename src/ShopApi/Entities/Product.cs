@@ -10,5 +10,8 @@ public class Product
     public int CategoryId { get; set; }
     public Category Category { get; set; } = null!;
 
+    // SQL Server rowversion giúp phát hiện hai request cùng sửa tồn kho.
+    public byte[] RowVersion { get; set; } = [];
+
     public ICollection<OrderItem> OrderItems { get; set; } = [];
 }

@@ -1,6 +1,62 @@
 @ShopApi_HostAddress = http://localhost:5065
+@token = paste-jwt-token-here
 
-GET {{ShopApi_HostAddress}}/weatherforecast/
+### [BẮT BUỘC] Đăng ký tài khoản
+POST {{ShopApi_HostAddress}}/api/auth/register
+Content-Type: application/json
+
+{
+  "username": "techlead01",
+  "email": "techlead01@example.com",
+  "password": "Strong@Pass123"
+}
+
+### [BẮT BUỘC] Đăng nhập để lấy JWT
+POST {{ShopApi_HostAddress}}/api/auth/login
+Content-Type: application/json
+
+{
+  "username": "techlead01",
+  "password": "Strong@Pass123"
+}
+
+### Product: paging + search + filter + sort
+GET {{ShopApi_HostAddress}}/api/products?pageNumber=1&pageSize=20&search=laptop&categoryId=1&minPrice=100000&maxPrice=30000000&inStock=true&sortBy=price&sortDirection=desc
+Authorization: Bearer {{token}}
 Accept: application/json
 
-###
+### Product: lấy chi tiết
+GET {{ShopApi_HostAddress}}/api/products/1
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Category: paging + search + sort
+GET {{ShopApi_HostAddress}}/api/categories?pageNumber=1&pageSize=20&search=electronic&sortBy=productCount&sortDirection=desc
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Product: tạo mới
+POST {{ShopApi_HostAddress}}/api/products
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "name": "Mechanical Keyboard",
+  "description": "Bàn phím cơ",
+  "price": 2500000,
+  "stock": 100,
+  "categoryId": 1
+}
+
+### Orders: paging + search + filter + sort
+GET {{ShopApi_HostAddress}}/api/orders?pageNumber=1&pageSize=10&search=laptop&status=Pending&fromDate=2026-01-01T00:00:00Z&toDate=2026-12-31T23:59:59Z&sortBy=totalAmount&sortDirection=desc
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Liveness: process API
+GET {{ShopApi_HostAddress}}/health/live
+Accept: application/json
+
+### Readiness: API + SQL Server
+GET {{ShopApi_HostAddress}}/health/ready
+Accept: application/json

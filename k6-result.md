@@ -9,67 +9,54 @@
 | `http_req_failed` | 33.96% | ❌ Threshold vượt (yêu cầu <5%) |
 | `order_success_rate` | 30.05% | ❌ Threshold vượt (yêu cầu >80%) |
 
-**Kết luận nhanh: API không yếu về hiệu năng. Vấn đề là business logic bug + sai test script.**
+**Kết luận nhanh: API không yếu về hiệu năng. Vấn đề là stock cạn kiệt + race condition trong code.**
 
 ---
 
-## Nguyên nhân thật sự (3 nguyên nhân)
+## Nguyên nhân thật sự (2 nguyên nhân)
 
-### Nguyên nhân 1 — Bug trong k6 script: Sai endpoint xem đơn hàng
+### Nguyên nhân 1 — Stock cạn kiệt trong quá trình test (nguyên nhân chính)
 
-**File:** `k6/03-mixed-realistic-test.js` dòng 300
-
-```js
-// ĐANG GỌI (sai):
-GET /api/Orders?page=1&pageSize=10
-
-// ĐÚNG phải là:
-GET /api/Orders/my?page=1&pageSize=10
-```
-
-**Tại sao sai:**
-- `GET /api/Orders` yêu cầu permission `[HasPermission("ORDER", "VIEW")]` — chỉ admin/manager mới có
-- Regular shopper nhận **403 Forbidden**
-- k6 đếm tất cả response không phải 2xx vào `http_req_failed`
-- Mỗi shopper đều có 1 lần gọi này → góp phần lớn vào 33.96% failed
-
-**Fix:** Đổi sang `/api/Orders/my` — endpoint dành riêng cho user xem đơn của mình, không cần permission đặc biệt.
-
----
-
-### Nguyên nhân 2 — Stock cạn kiệt trong quá trình test (nguyên nhân chính)
-
-**File:** `AuthDemo.Api/Controllers/OrdersController.cs` dòng 93–124
+**File:** `src/ShopApi/Controllers/OrdersController.cs` dòng 29–50
 
 ```csharp
 // 1. Đọc stock hiện tại
-var products = await _db.Products
-    .Where(p => productIds.Contains(p.Id) && p.IsActive)
+var products = await db.Products
+    .Where(p => productIds.Contains(p.Id))
     .ToDictionaryAsync(p => p.Id);
 
 // 2. Kiểm tra stock
 if (product.Stock < item.Quantity)
-    return BadRequest("không đủ tồn kho");  // ← Đây là thủ phạm
+    return BadRequest(new { message = $"Sản phẩm '{product.Name}' không đủ hàng. Còn: {product.Stock}" });
 
 // 3. Trừ stock và lưu
-products[item.ProductId].Stock -= item.Quantity;
-await _db.SaveChangesAsync();
+product.Stock -= item.Quantity;
+await db.SaveChangesAsync();
 ```
 
 **Tại sao fail:**
-- 40 shopper chạy song song trong 5 phút 30 giây
-- Tất cả random pick từ 15 product IDs (1–15)
+- 40 shopper chạy song song trong ~5 phút, mỗi shopper random chọn từ product ID 1–15
 - Stock của mỗi sản phẩm cạn sau vài chục request đầu tiên
-- Tất cả order tiếp theo trả về 400 BadRequest "không đủ tồn kho"
-- k6 đếm 400 vào `http_req_failed` và `order_success_rate` thất bại
+- Tất cả order tiếp theo trả về `400 BadRequest "không đủ hàng"`
+- k6 đếm 400 vào `http_req_failed` → đẩy rate lên 33.96%
+- `orderSuccessRate` chỉ tính response 200/201 → rơi xuống 30.05%
 
-**Fix:** Seed stock lớn cho test (ví dụ `Stock = 9999`) hoặc reset stock trong `setup()` của k6.
+**Fix:** Seed stock lớn cho test data (ví dụ `Stock = 9999`) hoặc reset stock trong `setup()` của k6:
+
+```js
+// Trong setup() của k6 — gọi 1 admin endpoint để reset stock trước khi test
+export function setup() {
+  http.post(`${BASE_URL}/api/Admin/reset-stock`, null, { headers: adminHeaders });
+}
+```
+
+Hoặc đơn giản hơn: tăng stock trong seed data lên đủ lớn để không cạn trong thời gian test.
 
 ---
 
-### Nguyên nhân 3 — Race condition TOCTOU: Không có lock khi trừ stock
+### Nguyên nhân 2 — Race condition TOCTOU: Không có lock khi trừ stock
 
-**File:** `AuthDemo.Api/Controllers/OrdersController.cs` dòng 93–127
+**File:** `src/ShopApi/Controllers/OrdersController.cs` dòng 39–63
 
 ```
 VU-1: đọc Stock=5 → check OK (5 >= 1) → trừ → lưu Stock=4
@@ -84,19 +71,33 @@ VU-3: đọc Stock=5 → check OK (5 >= 1) → trừ → lưu Stock=4  ← lại
 
 **Fix đúng — Atomic update tại DB level:**
 ```csharp
-// Thay đoạn "products[item.ProductId].Stock -= item.Quantity;"
-foreach (var item in request.Items)
+// Thay đoạn "product.Stock -= item.Quantity;" trong vòng lặp foreach
+foreach (var item in req.Items)
 {
-    var affected = await _db.Products
+    var affected = await db.Products
         .Where(p => p.Id == item.ProductId && p.Stock >= item.Quantity)
         .ExecuteUpdateAsync(s => s.SetProperty(p => p.Stock, p => p.Stock - item.Quantity));
 
     if (affected == 0)
-        return Conflict(new { message = $"Sản phẩm ID {item.ProductId} vừa hết hàng." });
+        return BadRequest(new { message = $"Sản phẩm #{item.ProductId} không đủ hàng." });
 }
 ```
 
-`WHERE Stock >= quantity` trong câu UPDATE là một thao tác nguyên tử tại DB — không có race condition.
+`WHERE Stock >= quantity` trong câu UPDATE là một thao tác nguyên tử tại DB — không có race condition.  
+Có thể bỏ luôn đoạn đọc products và validate trước, hoặc giữ lại để có message lỗi rõ hơn.
+
+---
+
+## Lưu ý về k6 script: endpoint `GET /api/Orders` đang dùng đúng
+
+**File:** `k6/03-mixed-realistic-test.js` dòng 300–301
+
+```js
+// Shopper xem lại đơn hàng vừa đặt
+const res = http.get(`${BASE_URL}/api/Orders?page=1&pageSize=10`, ...);
+```
+
+Endpoint này **đúng** với ShopApi. `GET /api/Orders` trong ShopApi (dòng 69–96) tự filter theo `UserId` của token — mọi authenticated user đều nhận được đơn hàng của chính mình, không có permission đặc biệt.
 
 ---
 
@@ -105,12 +106,10 @@ foreach (var item in request.Items)
 | Chỉ số | Giá trị | Ý nghĩa |
 |---|---|---|
 | `p95` response time | 10ms | API đang nhàn rỗi, không bị bottleneck |
-| CPU/RAM usage | (thấp) | Tài nguyên chưa bão hòa |
-| `http_req_failed` nguyên nhân | 400/403 | Logic bug, không phải overload |
+| `http_req_failed` nguyên nhân | 400 BadRequest | Stock cạn, không phải overload |
+| `order_success_rate` thấp | Stock hết từ sớm | Cần fix seed data + race condition |
 
 **Scaling API khi vấn đề là code bug sẽ không có tác dụng.** Fix code trước.
-
----
 
 ---
 
@@ -132,7 +131,7 @@ Scale API (thêm instance/pod) chỉ có tác dụng khi **API đang là bottlen
 
 | Dấu hiệu | Nguyên nhân thật | Fix đúng |
 |---|---|---|
-| Nhiều 400/403/422 | Bug validation / sai permission | Fix code |
+| Nhiều 400/422 | Bug validation / stock hết | Fix code |
 | `p95` thấp nhưng `rate failed` cao | Logic fail, không phải slow | Fix business logic |
 | Latency cao chỉ ở 1 endpoint | Query DB chậm | Tối ưu query, thêm index |
 | Timeout chỉ ở write path | DB lock contention | Fix transaction / index |
@@ -180,14 +179,10 @@ API Instance 3 ──┘
 -- Kiểm tra missing index
 SELECT * FROM sys.dm_db_missing_index_details
 
--- Với OrdersController, cần index:
--- Products(Id, IsActive, Stock)  ← query tạo order
--- Orders(UserId, CreatedAt)      ← query xem đơn theo user
+-- Với ShopApi, cần index:
+-- Products(Id, Stock)        ← query tạo order (check + update stock)
+-- Orders(UserId, CreatedAt)  ← query xem đơn theo user
 ```
-
-Với ShopApi hiện tại:
-- `Product.Stock` thường xuyên được đọc và ghi đồng thời → cần **index bao phủ**
-- `Order.UserId` được filter thường xuyên → đã có index trong DbContext (tốt)
 
 ### Cấp 2 — Read Replica (Scale đọc)
 
@@ -198,23 +193,9 @@ API Instances ──────┼─► Read Replica 2 (đọc)
 ```
 
 **Phù hợp khi:** 70–80% traffic là đọc (GET products, GET categories, GET orders).
-Đúng với hệ thống ShopApi — readers chiếm 70% traffic.
+Đúng với ShopApi — readers chiếm 70% traffic trong kịch bản test.
 
-EF Core hỗ trợ read replica qua:
-```csharp
-// Query đọc → chạy trên replica
-_db.Products.AsNoTracking().Where(...) // dùng read connection string
-
-// Query ghi → chạy trên primary
-_db.SaveChangesAsync()
-```
-
-### Cấp 3 — Sharding (Scale ghi theo partition)
-
-Chia dữ liệu theo key (ví dụ: userId % 4 → DB shard 0/1/2/3).
-**Phức tạp, chỉ cần khi:** Write throughput > 10.000 TPS, đã tối ưu hết cấp 1 và 2.
-
-### Cấp 4 — Cache Layer trước DB (giảm tải DB đọc)
+### Cấp 3 — Cache Layer trước DB (giảm tải DB đọc)
 
 ```
 API → Redis Cache → (miss) → Database
@@ -225,6 +206,11 @@ Với ShopApi:
 - Cache `GET /api/Products` — TTL 30–60 giây
 - **KHÔNG cache** `GET /api/Orders` — dữ liệu cá nhân, thay đổi liên tục
 
+### Cấp 4 — Sharding (Scale ghi theo partition)
+
+Chia dữ liệu theo key (ví dụ: userId % 4 → DB shard 0/1/2/3).
+**Phức tạp, chỉ cần khi:** Write throughput > 10.000 TPS, đã tối ưu hết cấp 1, 2, 3.
+
 ---
 
 ## Sơ đồ quyết định: Khi nào làm gì?
@@ -234,7 +220,7 @@ Với ShopApi:
                           │
               ┌───────────┴──────────────┐
               │                          │
-         4xx/403 nhiều              Timeout/slow
+         4xx nhiều                  Timeout/slow
               │                          │
          Fix code                   p95 > 1000ms?
                                          │
@@ -262,11 +248,10 @@ Với ShopApi:
 
 | Bước | Việc cần làm | Ưu tiên |
 |---|---|---|
-| 1 | Sửa k6 script: đổi `/api/Orders` → `/api/Orders/my` | Ngay bây giờ |
-| 2 | Sửa race condition: dùng `ExecuteUpdateAsync` với WHERE | Ngay bây giờ |
-| 3 | Tăng seed stock cho test data | Ngay bây giờ |
-| 4 | Thêm index `Products(IsActive, Stock)` | Trước khi production |
-| 5 | Thêm Redis cache cho Categories, Products list | Khi traffic thật tăng |
-| 6 | Scale API (add instances) | Khi CPU > 70% liên tục |
-| 7 | Read Replica DB | Khi DB CPU > 70% mà chủ yếu là đọc |
-| 8 | Sharding | Khi write > 10.000 TPS (hầu như không cần với ShopApi) |
+| 1 | Tăng seed stock đủ lớn (ví dụ 9999) để không cạn trong test | Ngay bây giờ |
+| 2 | Sửa race condition: dùng `ExecuteUpdateAsync` với `WHERE Stock >= quantity` | Ngay bây giờ |
+| 3 | Thêm index `Products(Id, Stock)` | Trước khi production |
+| 4 | Thêm Redis cache cho Categories, Products list | Khi traffic thật tăng |
+| 5 | Scale API (add instances) | Khi CPU > 70% liên tục |
+| 6 | Read Replica DB | Khi DB CPU > 70% mà chủ yếu là đọc |
+| 7 | Sharding | Khi write > 10.000 TPS (hầu như không cần với ShopApi) |

@@ -1,101 +1,216 @@
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using ShopApi.Common;
 using ShopApi.Data;
 using ShopApi.DTOs;
 using ShopApi.Entities;
+using ShopApi.Exceptions;
 
 namespace ShopApi.Controllers;
 
-[ApiController]
-[Route("api/[controller]")]
-[Authorize]
-public class ProductsController(AppDbContext db) : ControllerBase
+public class ProductsController(AppDbContext db) : AuthorizedApiControllerBase
 {
-    // GET /api/products?page=1&pageSize=20&categoryId=1
-    // Có phân trang — rất quan trọng khi load test với hàng triệu request
+    /// <summary>
+    /// Lấy danh sách sản phẩm có phân trang, tìm kiếm, lọc và sắp xếp.
+    /// </summary>
     [HttpGet]
-    public async Task<IActionResult> GetAll(
-        [FromQuery] int page = 1,
-        [FromQuery] int pageSize = 20,
-        [FromQuery] int? categoryId = null)
+    [ProducesResponseType(typeof(PagedResult<ProductResponse>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<PagedResult<ProductResponse>>> GetAll(
+        [FromQuery] ProductQuery request,
+        CancellationToken cancellationToken)
     {
-        var query = db.Products.Include(p => p.Category).AsQueryable();
+        var query = db.Products
+            .AsNoTracking()
+            .AsQueryable();
 
-        if (categoryId.HasValue)
-            query = query.Where(p => p.CategoryId == categoryId.Value);
+        var search = request.Search?.Trim();
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            query = query.Where(p =>
+                p.Name.Contains(search) ||
+                p.Description.Contains(search));
+        }
 
-        var total = await query.CountAsync();
+        if (request.CategoryId.HasValue)
+            query = query.Where(p => p.CategoryId == request.CategoryId.Value);
 
+        if (request.MinPrice.HasValue)
+            query = query.Where(p => p.Price >= request.MinPrice.Value);
+
+        if (request.MaxPrice.HasValue)
+            query = query.Where(p => p.Price <= request.MaxPrice.Value);
+
+        if (request.InStock.HasValue)
+        {
+            query = request.InStock.Value
+                ? query.Where(p => p.Stock > 0)
+                : query.Where(p => p.Stock == 0);
+        }
+
+        query = ApplySorting(query, request.SortBy, request.SortDirection);
+
+        var totalCount = await query.CountAsync(cancellationToken);
         var items = await query
-            .OrderBy(p => p.Id)
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
-            .Select(p => new ProductResponse(p.Id, p.Name, p.Description, p.Price, p.Stock, p.Category.Name))
-            .ToListAsync();
+            .Skip((request.PageNumber - 1) * request.PageSize)
+            .Take(request.PageSize)
+            .Select(p => new ProductResponse(
+                p.Id,
+                p.Name,
+                p.Description,
+                p.Price,
+                p.Stock,
+                p.CategoryId,
+                p.Category.Name))
+            .ToListAsync(cancellationToken);
 
-        return Ok(new PagedResult<ProductResponse>(items, total, page, pageSize));
+        return Ok(PagedResult<ProductResponse>.Create(
+            items,
+            totalCount,
+            request.PageNumber,
+            request.PageSize));
     }
 
-    // GET /api/products/{id}
-    [HttpGet("{id}")]
-    public async Task<IActionResult> GetById(int id)
+    [HttpGet("{id:int:min(1)}")]
+    [ProducesResponseType(typeof(ProductResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<ProductResponse>> GetById(
+        int id,
+        CancellationToken cancellationToken)
     {
         var product = await db.Products
-            .Include(p => p.Category)
+            .AsNoTracking()
             .Where(p => p.Id == id)
-            .Select(p => new ProductResponse(p.Id, p.Name, p.Description, p.Price, p.Stock, p.Category.Name))
-            .FirstOrDefaultAsync();
+            .Select(p => new ProductResponse(
+                p.Id,
+                p.Name,
+                p.Description,
+                p.Price,
+                p.Stock,
+                p.CategoryId,
+                p.Category.Name))
+            .FirstOrDefaultAsync(cancellationToken);
 
-        return product is null ? NotFound() : Ok(product);
+        return product ?? throw new NotFoundException("Sản phẩm", id);
     }
 
-    // POST /api/products
     [HttpPost]
-    public async Task<IActionResult> Create(ProductRequest req)
+    [ProducesResponseType(typeof(ProductResponse), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ValidationProblemDetails), StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<ProductResponse>> Create(
+        [FromBody] ProductRequest request,
+        CancellationToken cancellationToken)
     {
+        await EnsureCategoryExists(request.CategoryId, cancellationToken);
+
         var product = new Product
         {
-            Name = req.Name,
-            Description = req.Description,
-            Price = req.Price,
-            Stock = req.Stock,
-            CategoryId = req.CategoryId
+            Name = request.Name.Trim(),
+            Description = request.Description.Trim(),
+            Price = request.Price,
+            Stock = request.Stock,
+            CategoryId = request.CategoryId
         };
 
         db.Products.Add(product);
-        await db.SaveChangesAsync();
+        await db.SaveChangesAsync(cancellationToken);
 
-        return CreatedAtAction(nameof(GetById), new { id = product.Id },
-            new { product.Id, product.Name, product.Price });
+        var response = new ProductResponse(
+            product.Id,
+            product.Name,
+            product.Description,
+            product.Price,
+            product.Stock,
+            product.CategoryId,
+            await db.Categories
+                .Where(c => c.Id == product.CategoryId)
+                .Select(c => c.Name)
+                .SingleAsync(cancellationToken));
+
+        return CreatedAtAction(nameof(GetById), new { id = product.Id }, response);
     }
 
-    // PUT /api/products/{id}
-    [HttpPut("{id}")]
-    public async Task<IActionResult> Update(int id, ProductRequest req)
+    [HttpPut("{id:int:min(1)}")]
+    [ProducesResponseType(typeof(ProductResponse), StatusCodes.Status200OK)]
+    public async Task<ActionResult<ProductResponse>> Update(
+        int id,
+        [FromBody] ProductRequest request,
+        CancellationToken cancellationToken)
     {
-        var product = await db.Products.FindAsync(id);
-        if (product is null) return NotFound();
+        var product = await db.Products
+            .FirstOrDefaultAsync(p => p.Id == id, cancellationToken)
+            ?? throw new NotFoundException("Sản phẩm", id);
 
-        product.Name = req.Name;
-        product.Description = req.Description;
-        product.Price = req.Price;
-        product.Stock = req.Stock;
-        product.CategoryId = req.CategoryId;
+        await EnsureCategoryExists(request.CategoryId, cancellationToken);
 
-        await db.SaveChangesAsync();
-        return NoContent();
+        product.Name = request.Name.Trim();
+        product.Description = request.Description.Trim();
+        product.Price = request.Price;
+        product.Stock = request.Stock;
+        product.CategoryId = request.CategoryId;
+
+        await db.SaveChangesAsync(cancellationToken);
+
+        var categoryName = await db.Categories
+            .Where(c => c.Id == product.CategoryId)
+            .Select(c => c.Name)
+            .SingleAsync(cancellationToken);
+
+        return Ok(new ProductResponse(
+            product.Id,
+            product.Name,
+            product.Description,
+            product.Price,
+            product.Stock,
+            product.CategoryId,
+            categoryName));
     }
 
-    // DELETE /api/products/{id}
-    [HttpDelete("{id}")]
-    public async Task<IActionResult> Delete(int id)
+    [HttpDelete("{id:int:min(1)}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> Delete(int id, CancellationToken cancellationToken)
     {
-        var product = await db.Products.FindAsync(id);
-        if (product is null) return NotFound();
+        var product = await db.Products
+            .FirstOrDefaultAsync(p => p.Id == id, cancellationToken)
+            ?? throw new NotFoundException("Sản phẩm", id);
+
+        var isUsedByOrder = await db.OrderItems
+            .AnyAsync(item => item.ProductId == id, cancellationToken);
+
+        if (isUsedByOrder)
+        {
+            throw new ConflictException(
+                "PRODUCT_IN_USE",
+                "Không thể xóa sản phẩm đã phát sinh đơn hàng. Hãy ngừng kinh doanh hoặc soft-delete sản phẩm.");
+        }
 
         db.Products.Remove(product);
-        await db.SaveChangesAsync();
+        await db.SaveChangesAsync(cancellationToken);
         return NoContent();
+    }
+
+    private async Task EnsureCategoryExists(int categoryId, CancellationToken cancellationToken)
+    {
+        if (!await db.Categories.AnyAsync(c => c.Id == categoryId, cancellationToken))
+            throw new NotFoundException("Danh mục", categoryId);
+    }
+
+    private static IQueryable<Product> ApplySorting(
+        IQueryable<Product> query,
+        string sortBy,
+        string sortDirection)
+    {
+        var descending = sortDirection.Equals("desc", StringComparison.OrdinalIgnoreCase);
+
+        return (sortBy.ToLowerInvariant(), descending) switch
+        {
+            ("name", false) => query.OrderBy(p => p.Name).ThenBy(p => p.Id),
+            ("name", true) => query.OrderByDescending(p => p.Name).ThenByDescending(p => p.Id),
+            ("price", false) => query.OrderBy(p => p.Price).ThenBy(p => p.Id),
+            ("price", true) => query.OrderByDescending(p => p.Price).ThenByDescending(p => p.Id),
+            ("stock", false) => query.OrderBy(p => p.Stock).ThenBy(p => p.Id),
+            ("stock", true) => query.OrderByDescending(p => p.Stock).ThenByDescending(p => p.Id),
+            ("id", true) => query.OrderByDescending(p => p.Id),
+            _ => query.OrderBy(p => p.Id)
+        };
     }
 }
